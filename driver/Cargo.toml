@@ -14,4 +14,4 @@ serde_json = "1"
 rustyline = "15"
 ratatui = "0.30"
 crossterm = "0.29"
-schema-tui = { path = "../../schema-tui" }
+schema-tui = { git = "https://github.com/harc-lang/schema-tui.git" }
