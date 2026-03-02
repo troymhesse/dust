@@ -4,6 +4,7 @@ use crate::command::{Command, Message};
 use crate::driver::Driver;
 use crate::solver::Solver;
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
 
 /// Handle returned by [`spawn`]. Provides command/message channels
 /// and a join handle for the driver thread.
@@ -39,31 +40,53 @@ where
     }
 }
 
+/// Minimum time to spend stepping before checking for commands.
+const STEP_BATCH_DURATION: Duration = Duration::from_millis(30);
+
 fn worker_main<S: Solver>(
     mut driver: Driver<S>,
     cmd_rx: Receiver<Command>,
     msg_tx: Sender<Message>,
 ) {
     loop {
-        let cmd = if driver.is_running() {
-            match cmd_rx.try_recv() {
-                Ok(cmd) => cmd,
-                Err(std::sync::mpsc::TryRecvError::Empty) => Command::Run,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        if driver.is_running() {
+            // Process any pending commands first
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                let is_quit = matches!(cmd, Command::Quit);
+                for msg in driver.accept(cmd) {
+                    let _ = msg_tx.send(msg);
+                }
+                if is_quit {
+                    return;
+                }
+            }
+
+            // If we're still running after processing commands, step in a batch
+            if driver.is_running() {
+                let deadline = Instant::now() + STEP_BATCH_DURATION;
+                while driver.is_running() {
+                    for msg in driver.accept(Command::Run) {
+                        let _ = msg_tx.send(msg);
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
             }
         } else {
+            // Idle: block until a command arrives
             match cmd_rx.recv() {
-                Ok(cmd) => cmd,
-                Err(_) => break,
+                Ok(cmd) => {
+                    let is_quit = matches!(cmd, Command::Quit);
+                    for msg in driver.accept(cmd) {
+                        let _ = msg_tx.send(msg);
+                    }
+                    if is_quit {
+                        return;
+                    }
+                }
+                Err(_) => return,
             }
-        };
-
-        let is_quit = matches!(cmd, Command::Quit);
-        for msg in driver.accept(cmd) {
-            let _ = msg_tx.send(msg);
-        }
-        if is_quit {
-            break;
         }
     }
 }
