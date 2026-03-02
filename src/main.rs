@@ -368,6 +368,106 @@ impl Render for DustApp {
         let status = self.status_text.clone();
         let running = self.running;
 
+        let has_state = self.has_state;
+        let transport = if !has_state {
+            // No state: single "▶" button that creates state
+            h_flex().child(
+                div()
+                    .id("transport-create")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
+                    .text_sm()
+                    .child("▶")
+                    .on_click(cx.listener(|this, _, _, _cx| {
+                        this.send(Command::CreateState);
+                    })),
+            )
+        } else if running {
+            // Running: "⏸" pause button
+            h_flex().child(
+                div()
+                    .id("transport-pause")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
+                    .text_sm()
+                    .child("⏸")
+                    .on_click(cx.listener(|this, _, _, _cx| {
+                        this.running = false;
+                        this.send(Command::Pause);
+                    })),
+            )
+        } else {
+            // Paused with state: split button "▶ │ ›"
+            h_flex()
+                .rounded_md()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("transport-play")
+                        .px_3()
+                        .py_1()
+                        .cursor_pointer()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .text_sm()
+                        .child("▶")
+                        .on_click(cx.listener(|this, _, _, _cx| {
+                            this.running = true;
+                            this.send(Command::Run);
+                        })),
+                )
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .h_full()
+                        .bg(cx.theme().primary_foreground.opacity(0.3)),
+                )
+                .child(
+                    div()
+                        .id("transport-step")
+                        .px_3()
+                        .py_1()
+                        .cursor_pointer()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .text_sm()
+                        .child("›")
+                        .on_click(cx.listener(|this, _, _, _cx| {
+                            this.send(Command::Step);
+                            this.send(Command::QueryPlotData);
+                        })),
+                )
+        };
+
+        let destroy = if has_state {
+            Some(
+                div()
+                    .id("destroy-btn")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(cx.theme().secondary)
+                    .text_color(cx.theme().secondary_foreground)
+                    .text_xs()
+                    .child("✕")
+                    .on_click(cx.listener(|this, _, _, _cx| {
+                        this.running = false;
+                        this.send(Command::DestroyState);
+                    })),
+            )
+        } else {
+            None
+        };
+
         v_flex()
             .size_full()
             .child(
@@ -379,74 +479,8 @@ impl Render for DustApp {
                     .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .id("play-pause-btn")
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .bg(cx.theme().primary)
-                            .text_color(cx.theme().primary_foreground)
-                            .text_xs()
-                            .child(if running { "Pause" } else { "Play" })
-                            .on_click(cx.listener(|this, _, _, _cx| {
-                                if this.running {
-                                    this.running = false;
-                                    this.send(Command::Pause);
-                                } else {
-                                    this.running = true;
-                                    this.send(Command::Run);
-                                }
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("step-btn")
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .bg(cx.theme().secondary)
-                            .text_color(cx.theme().secondary_foreground)
-                            .text_xs()
-                            .child("Step")
-                            .on_click(cx.listener(|this, _, _, _cx| {
-                                this.send(Command::Step);
-                                this.send(Command::QueryPlotData);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("create-btn")
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .bg(cx.theme().secondary)
-                            .text_color(cx.theme().secondary_foreground)
-                            .text_xs()
-                            .child("Create")
-                            .on_click(cx.listener(|this, _, _, _cx| {
-                                this.send(Command::CreateState);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("destroy-btn")
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .bg(cx.theme().secondary)
-                            .text_color(cx.theme().secondary_foreground)
-                            .text_xs()
-                            .child("Destroy")
-                            .on_click(cx.listener(|this, _, _, _cx| {
-                                this.running = false;
-                                this.send(Command::DestroyState);
-                            })),
-                    )
+                    .child(transport)
+                    .children(destroy)
                     .child(
                         div()
                             .pl_4()
