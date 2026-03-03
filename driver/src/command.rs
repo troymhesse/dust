@@ -3,6 +3,7 @@
 use serde_json::Value;
 
 /// Commands sent from a frontend to the driver.
+#[derive(Clone)]
 pub enum Command {
     /// Start or resume the simulation loop.
     Run,

@@ -1569,6 +1569,8 @@ name = "driver"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "gpui",
+ "gpui-component",
  "ratatui",
  "rmp-serde",
  "ron",

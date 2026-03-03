@@ -1,39 +1,27 @@
 //! Particle simulation with GPUI visualization.
 
-use driver::command::{Command, DriverMode, Event};
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use driver::command::Command;
 use driver::config::SimulationConfig;
-use driver::watch::Snapshot;
+use driver::gpui_frontend::{
+    self, CreateState, DestroyState, DriverFooter, DriverLog, Quit, SnapshotReader, Step,
+    ToggleLog, ToggleRun, WriteCheckpoint, WriteConfig,
+};
 use driver::worker::DriverHandle;
 use driver::{Action, CliArgs, Driver, DriverState, Mode, PlotData, Solver, StepInfo, Validate};
 use gpui::{
     App, AppContext as _, Application, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, Menu, MenuItem, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, Window, WindowOptions, actions, div, px, size,
+    InteractiveElement as _, IntoElement, Menu, MenuItem, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px, size,
 };
 use gpui_component::{ActiveTheme, Root, h_flex, scroll::ScrollableElement, v_flex};
 use gpui_plot::{Plot, PlotStyle, Series, data_range};
 use gpui_schema::{NodeFilter, SchemaForm};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::mpsc::TryRecvError;
-
-// ============================================================================
-// Log message types
-// ============================================================================
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum LogLevel {
-    Info,
-    Error,
-    Iteration,
-}
-
-#[derive(Debug, Clone)]
-struct LogMessage {
-    text: String,
-    level: LogLevel,
-}
 
 // ============================================================================
 // Config types
@@ -48,16 +36,16 @@ struct DustPhysics {
     dt: f64,
     /// Gravitational softening length
     softening: f64,
-    /// Central mass strength
+    /// Mass of the central object
     central_mass: f64,
 }
 
 impl Default for DustPhysics {
     fn default() -> Self {
         Self {
-            tfinal: 1e6,
+            tfinal: 10.0,
             dt: 0.001,
-            softening: 0.05,
+            softening: 0.01,
             central_mass: 1.0,
         }
     }
@@ -70,14 +58,14 @@ impl Validate for DustPhysics {}
 struct DustInitial {
     /// Number of particles
     num_particles: usize,
-    /// Initial configuration
+    /// Initial condition setup
     setup: DustSetup,
 }
 
 impl Default for DustInitial {
     fn default() -> Self {
         Self {
-            num_particles: 200,
+            num_particles: 1000,
             setup: DustSetup::Ring,
         }
     }
@@ -87,9 +75,9 @@ impl Validate for DustInitial {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 enum DustSetup {
-    /// Particles arranged in a ring
+    /// Particles on a circular ring
     Ring,
-    /// Particles in a random disk
+    /// Particles in a randomized disk
     RandomDisk,
 }
 
@@ -299,30 +287,14 @@ impl Solver for Dust {
 // GPUI Application
 // ============================================================================
 
-actions!(
-    dust,
-    [
-        Quit,
-        ToggleRun,
-        Step,
-        CreateState,
-        DestroyState,
-        WriteCheckpoint,
-        WriteConfig,
-        ToggleLog,
-    ]
-);
-
 struct DustApp {
     handle: DriverHandle,
     form: Entity<SchemaForm>,
     plot: Entity<Plot>,
     focus_handle: FocusHandle,
-    status_text: String,
-    last_snapshot: Snapshot,
-    log_lines: Vec<LogMessage>,
-    last_message: Option<LogMessage>,
-    show_log: bool,
+    snapshot_reader: SnapshotReader,
+    log: DriverLog,
+    show_log: Rc<Cell<bool>>,
 }
 
 impl Focusable for DustApp {
@@ -332,42 +304,25 @@ impl Focusable for DustApp {
 }
 
 impl DustApp {
-    fn log_info(&mut self, msg: impl Into<String>) {
-        let msg = LogMessage {
-            text: msg.into(),
-            level: LogLevel::Info,
-        };
-        self.last_message = Some(msg.clone());
-        self.log_lines.push(msg);
-    }
-
-    fn log_error(&mut self, msg: impl Into<String>) {
-        let msg = LogMessage {
-            text: msg.into(),
-            level: LogLevel::Error,
-        };
-        self.last_message = Some(msg.clone());
-        self.log_lines.push(msg);
-    }
-
-    fn log_iteration(&mut self, msg: impl Into<String>) {
-        let msg = LogMessage {
-            text: msg.into(),
-            level: LogLevel::Iteration,
-        };
-        self.last_message = Some(msg.clone());
-        self.log_lines.push(msg);
-    }
-
+    /// Read the latest snapshot, diff it, drain events, and perform
+    /// app-specific updates (plot data, config filter).
     fn read_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let snap = self.handle.snapshot.read();
-        let changed_state = snap.has_state != self.last_snapshot.has_state;
-        let _changed_running = snap.mode != self.last_snapshot.mode;
+        let diff = self.snapshot_reader.update(&self.handle.snapshot);
 
-        // Update plot data in place (preserves pan/zoom view state)
-        if snap.iteration != self.last_snapshot.iteration || changed_state {
+        // Drain events into the log (generic)
+        self.log.drain_events(&self.handle.event_rx);
+
+        // Log iteration messages when iteration advances
+        if diff.iteration_advanced && !self.snapshot_reader.status_text().is_empty() {
+            self.log
+                .log_iteration(self.snapshot_reader.status_text().to_string());
+        }
+
+        // App-specific: update plot data (preserves pan/zoom view state)
+        if diff.iteration_advanced || diff.state_changed {
+            let snap = self.snapshot_reader.snapshot();
             let style = PlotStyle::from_theme(cx.theme());
-            let first_data = !self.last_snapshot.has_state && snap.has_state;
+            let first_data = diff.state_changed && snap.has_state;
             if let (Some(x), Some(y)) = (snap.linear.get("x"), snap.linear.get("y")) {
                 self.plot.update(cx, |plot, cx| {
                     plot.set_series(vec![
@@ -391,70 +346,23 @@ impl DustApp {
             }
         }
 
-        // Update form filter when state existence changes
-        if changed_state {
-            let has_state = snap.has_state;
+        // App-specific: update form filter when state existence changes
+        if diff.state_changed {
+            let has_state = self.snapshot_reader.has_state();
             self.form.update(cx, |form, cx| {
                 form.set_filter(DustFilter { has_state }, window, cx);
             });
-        }
-
-        // Log iteration messages when iteration advances
-        if snap.iteration != self.last_snapshot.iteration && !snap.status_text.is_empty() {
-            self.log_iteration(snap.status_text.clone());
-        }
-
-        self.status_text = snap.status_text.clone();
-        self.last_snapshot = snap;
-
-        // Drain events (low-frequency)
-        loop {
-            match self.handle.event_rx.try_recv() {
-                Ok(Event::Error(e)) => {
-                    self.log_error(format!("Error: {}", e));
-                }
-                Ok(Event::ConfigUpdated(Ok(()))) => {
-                    self.log_info("config updated");
-                }
-                Ok(Event::ConfigUpdated(Err(e))) => {
-                    self.log_error(format!("Config error: {}", e));
-                }
-                Ok(Event::SimulationDone) => {
-                    self.log_info("simulation done");
-                }
-                Ok(Event::CheckpointWritten { path }) => {
-                    self.log_info(format!("wrote {}", path));
-                }
-                Ok(Event::StateCreated) => {
-                    self.log_info("state created");
-                }
-                Ok(Event::StateDestroyed) => {
-                    self.log_info("state destroyed");
-                }
-                Ok(Event::ConfigWritten { path }) => {
-                    self.log_info(format!("wrote config to {}", path));
-                }
-                Ok(Event::ConfigLoaded { path }) => {
-                    self.log_info(format!("loaded config from {}", path));
-                }
-                Ok(Event::CheckpointLoaded { path }) => {
-                    self.log_info(format!("loaded checkpoint from {}", path));
-                }
-                Ok(_) => {}
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
         }
 
         window.request_animation_frame();
     }
 
     fn running(&self) -> bool {
-        self.last_snapshot.mode == DriverMode::Running
+        self.snapshot_reader.running()
     }
 
     fn has_state(&self) -> bool {
-        self.last_snapshot.has_state
+        self.snapshot_reader.has_state()
     }
 
     fn editing(&self, cx: &Context<Self>) -> bool {
@@ -475,186 +383,11 @@ impl Render for DustApp {
             self.send(Command::UpdateConfig(value));
         }
 
-        let running = self.running();
-        let has_state = self.has_state();
-        let show_log = self.show_log;
-        let mono = cx.theme().mono_font_family.clone();
-
-        // Footer hint bar - build hints with actions for clickability
-        let key_color = gpui::Hsla::from(cx.theme().warning);
-        let text_color = gpui::Hsla::from(cx.theme().muted_foreground);
-        let bg_color = cx.theme().title_bar;
-
-        // Each hint: (key_label, description, element_id, action_tag)
-        // action_tag is a short string used to dispatch the right command on click
-        struct Hint {
-            key: &'static str,
-            desc: &'static str,
-            id: &'static str,
-            action: &'static str,
-        }
-
-        let mut hints: Vec<Hint> = Vec::new();
-        if running {
-            hints.push(Hint { key: "p", desc: "pause", id: "hint-p", action: "pause" });
-        } else if has_state {
-            hints.push(Hint { key: "p", desc: "play", id: "hint-p", action: "play" });
-        }
-        if has_state && !running {
-            hints.push(Hint { key: "s", desc: "step", id: "hint-s", action: "step" });
-        }
-        if !has_state {
-            hints.push(Hint { key: "n", desc: "new", id: "hint-n", action: "new" });
-        }
-        if has_state && !running {
-            hints.push(Hint { key: "d", desc: "destroy", id: "hint-d", action: "destroy" });
-        }
-        if has_state && !running {
-            hints.push(Hint { key: "c", desc: "checkpoint", id: "hint-c", action: "checkpoint" });
-            hints.push(Hint { key: "w", desc: "write-cfg", id: "hint-w", action: "write-cfg" });
-        }
-        hints.push(Hint {
-            key: "l",
-            desc: if show_log { "plot" } else { "log" },
-            id: "hint-l",
-            action: "toggle-log",
-        });
-
-        let footer_hints = h_flex()
-            .gap_0p5()
-            .items_center()
-            .flex_shrink_0()
-            .children(hints.into_iter().enumerate().map(|(i, hint)| {
-                let action = hint.action;
-                div()
-                    .id(hint.id)
-                    .cursor_pointer()
-                    .child(
-                        h_flex().children({
-                            let mut parts = Vec::new();
-                            if i > 0 {
-                                parts.push(
-                                    div()
-                                        .text_xs()
-                                        .font_family(mono.clone())
-                                        .text_color(text_color)
-                                        .child(" ")
-                                        .into_any_element(),
-                                );
-                            }
-                            parts.push(
-                                div()
-                                    .text_xs()
-                                    .font_family(mono.clone())
-                                    .text_color(key_color)
-                                    .child(hint.key)
-                                    .into_any_element(),
-                            );
-                            parts.push(
-                                div()
-                                    .text_xs()
-                                    .font_family(mono.clone())
-                                    .text_color(text_color)
-                                    .child(format!(":{}", hint.desc))
-                                    .into_any_element(),
-                            );
-                            parts
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, _, _cx| {
-                        match action {
-                            "pause" => this.send(Command::Pause),
-                            "play" => this.send(Command::Run),
-                            "step" => this.send(Command::Step),
-                            "new" => this.send(Command::CreateState),
-                            "destroy" => this.send(Command::DestroyState),
-                            "checkpoint" => this.send(Command::Checkpoint),
-                            "write-cfg" => this.send(Command::WriteConfig("config.ron".into())),
-                            "toggle-log" => this.show_log = !this.show_log,
-                            _ => {}
-                        }
-                    }))
-                    .into_any_element()
-            }));
-
-        // Right-hand side: iteration info
-        let iteration_text = if has_state {
-            format!(
-                "[{:06}] t={:.6e}",
-                self.last_snapshot.iteration, self.last_snapshot.time
-            )
-        } else {
-            String::new()
-        };
-
-        // Last message with color
-        let last_msg_element = if let Some(ref msg) = self.last_message {
-            let color = match msg.level {
-                LogLevel::Info => gpui::Hsla::from(cx.theme().success),
-                LogLevel::Error => gpui::Hsla::from(cx.theme().danger),
-                LogLevel::Iteration => text_color,
-            };
-            div()
-                .text_xs()
-                .font_family(mono.clone())
-                .text_color(color)
-                .child(msg.text.clone())
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        };
-
-        let footer = h_flex()
-            .h(px(30.0))
-            .px_2()
-            .items_center()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(bg_color)
-            .child(footer_hints)
-            .child(div().flex_1()) // spacer
-            .child(
-                h_flex()
-                    .gap_3()
-                    .flex_shrink_0()
-                    .items_center()
-                    .child(last_msg_element)
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family(mono.clone())
-                            .text_color(text_color)
-                            .child(iteration_text),
-                    ),
-            );
-
-        // Log view
-        let log_view = {
-            let log_lines = self.log_lines.clone();
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .p_2()
-                .bg(cx.theme().background)
-                .children(log_lines.into_iter().map(|msg| {
-                    let color = match msg.level {
-                        LogLevel::Info => gpui::Hsla::from(cx.theme().success),
-                        LogLevel::Error => gpui::Hsla::from(cx.theme().danger),
-                        LogLevel::Iteration => gpui::Hsla::from(cx.theme().muted_foreground),
-                    };
-                    div()
-                        .text_xs()
-                        .font_family(mono.clone())
-                        .text_color(color)
-                        .child(msg.text)
-                        .into_any_element()
-                }))
-        };
+        let show_log = self.show_log.get();
 
         // Right panel: either plot or log
         let right_panel = if show_log {
-            log_view.into_any_element()
+            self.log.render_log_view(cx).into_any_element()
         } else {
             div()
                 .flex_1()
@@ -662,6 +395,12 @@ impl Render for DustApp {
                 .child(self.plot.clone())
                 .into_any_element()
         };
+
+        // Footer (generic driver widget)
+        let cmd_tx = self.handle.cmd_tx.clone();
+        let footer = DriverFooter::new(&self.snapshot_reader, &self.log, self.show_log.clone())
+            .cmd_tx(cmd_tx)
+            .render(cx);
 
         let focus_handle = self.focus_handle.clone();
         let focus_handle2 = self.focus_handle.clone();
@@ -725,7 +464,7 @@ impl Render for DustApp {
                 if this.editing(cx) {
                     return;
                 }
-                this.show_log = !this.show_log;
+                this.show_log.set(!this.show_log.get());
             }))
             .child(
                 // Main content: config panel + plot/log
@@ -783,16 +522,8 @@ fn main() {
         gpui_schema::init(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("p", ToggleRun, None),
-            KeyBinding::new("s", Step, None),
-            KeyBinding::new("n", CreateState, None),
-            KeyBinding::new("d", DestroyState, None),
-            KeyBinding::new("c", WriteCheckpoint, None),
-            KeyBinding::new("w", WriteConfig, None),
-            KeyBinding::new("l", ToggleLog, None),
-        ]);
+        gpui_frontend::register_keybindings(cx);
+
         cx.set_menus(vec![Menu {
             name: "Dust".into(),
             items: vec![MenuItem::action("Quit", Quit)],
@@ -844,11 +575,9 @@ fn main() {
                         form,
                         plot,
                         focus_handle,
-                        status_text: "Ready".into(),
-                        last_snapshot: Snapshot::default(),
-                        log_lines: Vec::new(),
-                        last_message: None,
-                        show_log: false,
+                        snapshot_reader: SnapshotReader::new(),
+                        log: DriverLog::new(),
+                        show_log: Rc::new(Cell::new(false)),
                     }
                 });
 

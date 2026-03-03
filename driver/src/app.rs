@@ -5,7 +5,7 @@
 //! [`Mode::Gui`] (launch a native window) vs the terminal modes handled by
 //! [`run`].
 
-use crate::config::{Checkpoint, SimulationConfig, build_nested, merge};
+use crate::config::{build_nested, merge, Checkpoint, SimulationConfig};
 use crate::driver::{Driver, DriverState};
 use crate::solver::Solver;
 use serde_json::Value;
@@ -195,7 +195,13 @@ where
     match cli.mode {
         Mode::Batch => frontend::cli::run(handle),
         Mode::Repl => frontend::repl::run(handle),
+        #[cfg(feature = "tui")]
         Mode::Tui => frontend::tui::run(handle, Vec::new()),
+        #[cfg(not(feature = "tui"))]
+        Mode::Tui => {
+            eprintln!("error: TUI mode requires the 'tui' feature");
+            std::process::exit(1);
+        }
         Mode::Gui => {
             unreachable!("Mode::Gui should be handled by the binary, not app::run")
         }
