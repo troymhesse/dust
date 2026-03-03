@@ -282,7 +282,18 @@ impl Solver for Dust {
 // GPUI Application
 // ============================================================================
 
-actions!(dust, [Quit]);
+actions!(
+    dust,
+    [
+        Quit,
+        ToggleRun,
+        Step,
+        CreateState,
+        DestroyState,
+        WriteCheckpoint,
+        WriteConfig,
+    ]
+);
 
 struct DustApp {
     handle: DriverHandle,
@@ -365,6 +376,10 @@ impl DustApp {
         self.last_snapshot.has_state
     }
 
+    fn editing(&self, cx: &Context<Self>) -> bool {
+        self.form.read(cx).editing()
+    }
+
     fn send(&self, cmd: Command) {
         let _ = self.handle.cmd_tx.send(cmd);
     }
@@ -443,8 +458,104 @@ impl Render for DustApp {
                 }
             }));
 
+        // Footer hint bar
+        let key_color = gpui::Hsla::from(cx.theme().warning);
+        let text_color = gpui::Hsla::from(cx.theme().muted_foreground);
+        let bg_color = cx.theme().title_bar;
+
+        let mut hints: Vec<(&str, &str)> = Vec::new();
+        if running {
+            hints.push(("p", "pause"));
+        } else if has_state {
+            hints.push(("p", "play"));
+        }
+        if has_state && !running {
+            hints.push(("s", "step"));
+        }
+        if !has_state {
+            hints.push(("n", "new"));
+        }
+        if has_state && !running {
+            hints.push(("d", "destroy"));
+        }
+        if has_state && !running {
+            hints.push(("c", "checkpoint"));
+            hints.push(("w", "write-cfg"));
+        }
+
+        let footer = h_flex()
+            .h(px(22.0))
+            .px_2()
+            .gap_0p5()
+            .items_center()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(bg_color)
+            .children(hints.into_iter().enumerate().flat_map(|(i, (key, desc))| {
+                let mut spans = Vec::new();
+                if i > 0 {
+                    spans.push(
+                        div()
+                            .text_xs()
+                            .text_color(text_color)
+                            .child(" ")
+                            .into_any_element(),
+                    );
+                }
+                spans.push(
+                    div()
+                        .text_xs()
+                        .text_color(key_color)
+                        .child(format!("{}", key))
+                        .into_any_element(),
+                );
+                spans.push(
+                    div()
+                        .text_xs()
+                        .text_color(text_color)
+                        .child(format!(":{}", desc))
+                        .into_any_element(),
+                );
+                spans
+            }));
+
         v_flex()
             .size_full()
+            .on_action(cx.listener(|this, _: &ToggleRun, _, cx| {
+                if this.editing(cx) || !this.has_state() {
+                    return;
+                }
+                if this.running() {
+                    this.send(Command::Pause);
+                } else {
+                    this.send(Command::Run);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Step, _, cx| {
+                if !this.editing(cx) && this.has_state() && !this.running() {
+                    this.send(Command::Step);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CreateState, _, cx| {
+                if !this.editing(cx) && !this.has_state() {
+                    this.send(Command::CreateState);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DestroyState, _, cx| {
+                if !this.editing(cx) && this.has_state() && !this.running() {
+                    this.send(Command::DestroyState);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &WriteCheckpoint, _, cx| {
+                if !this.editing(cx) && this.has_state() && !this.running() {
+                    this.send(Command::Checkpoint);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &WriteConfig, _, cx| {
+                if !this.editing(cx) {
+                    this.send(Command::WriteConfig("config.ron".into()));
+                }
+            }))
             .child(
                 // Toolbar
                 h_flex()
@@ -480,6 +591,7 @@ impl Render for DustApp {
                     )
                     .child(div().flex_1().size_full().child(self.plot.clone())),
             )
+            .child(footer)
     }
 }
 
@@ -504,7 +616,15 @@ fn main() {
         gpui_schema::init(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("p", ToggleRun, None),
+            KeyBinding::new("s", Step, None),
+            KeyBinding::new("n", CreateState, None),
+            KeyBinding::new("d", DestroyState, None),
+            KeyBinding::new("c", WriteCheckpoint, None),
+            KeyBinding::new("w", WriteConfig, None),
+        ]);
         cx.set_menus(vec![Menu {
             name: "Dust".into(),
             items: vec![MenuItem::action("Quit", Quit)],
