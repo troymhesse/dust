@@ -6,9 +6,9 @@ use driver::watch::Snapshot;
 use driver::worker::DriverHandle;
 use driver::{Action, CliArgs, Driver, DriverState, Mode, PlotData, Solver, StepInfo, Validate};
 use gpui::{
-    App, AppContext as _, Application, Context, Entity, InteractiveElement as _, IntoElement,
-    KeyBinding, Menu, MenuItem, ParentElement, Render, StatefulInteractiveElement as _, Styled,
-    Window, WindowOptions, actions, div, px, size,
+    App, AppContext as _, Application, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyBinding, Menu, MenuItem, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, Window, WindowOptions, actions, div, px, size,
 };
 use gpui_component::{ActiveTheme, Root, h_flex, scroll::ScrollableElement, v_flex};
 use gpui_plot::{Plot, PlotStyle, Series, data_range};
@@ -317,11 +317,18 @@ struct DustApp {
     handle: DriverHandle,
     form: Entity<SchemaForm>,
     plot: Entity<Plot>,
+    focus_handle: FocusHandle,
     status_text: String,
     last_snapshot: Snapshot,
     log_lines: Vec<LogMessage>,
     last_message: Option<LogMessage>,
     show_log: bool,
+}
+
+impl Focusable for DustApp {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
 }
 
 impl DustApp {
@@ -626,7 +633,7 @@ impl Render for DustApp {
             let log_lines = self.log_lines.clone();
             div()
                 .flex_1()
-                .size_full()
+                .min_h_0()
                 .overflow_y_scrollbar()
                 .p_2()
                 .bg(cx.theme().background)
@@ -656,10 +663,18 @@ impl Render for DustApp {
                 .into_any_element()
         };
 
+        let focus_handle = self.focus_handle.clone();
+        let focus_handle2 = self.focus_handle.clone();
+
         v_flex()
+            .id("dust-app-root")
+            .track_focus(&self.focus_handle)
             .size_full()
             .on_action(cx.listener(|this, _: &ToggleRun, _, cx| {
-                if this.editing(cx) || !this.has_state() {
+                if this.editing(cx) {
+                    return;
+                }
+                if !this.has_state() {
                     return;
                 }
                 if this.running() {
@@ -669,40 +684,54 @@ impl Render for DustApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &Step, _, cx| {
-                if !this.editing(cx) && this.has_state() && !this.running() {
+                if this.editing(cx) {
+                    return;
+                }
+                if this.has_state() && !this.running() {
                     this.send(Command::Step);
                 }
             }))
             .on_action(cx.listener(|this, _: &CreateState, _, cx| {
-                if !this.editing(cx) && !this.has_state() {
+                if this.editing(cx) {
+                    return;
+                }
+                if !this.has_state() {
                     this.send(Command::CreateState);
                 }
             }))
             .on_action(cx.listener(|this, _: &DestroyState, _, cx| {
-                if !this.editing(cx) && this.has_state() && !this.running() {
+                if this.editing(cx) {
+                    return;
+                }
+                if this.has_state() && !this.running() {
                     this.send(Command::DestroyState);
                 }
             }))
             .on_action(cx.listener(|this, _: &WriteCheckpoint, _, cx| {
-                if !this.editing(cx) && this.has_state() && !this.running() {
+                if this.editing(cx) {
+                    return;
+                }
+                if this.has_state() && !this.running() {
                     this.send(Command::Checkpoint);
                 }
             }))
             .on_action(cx.listener(|this, _: &WriteConfig, _, cx| {
-                if !this.editing(cx) {
-                    this.send(Command::WriteConfig("config.ron".into()));
+                if this.editing(cx) {
+                    return;
                 }
+                this.send(Command::WriteConfig("config.ron".into()));
             }))
             .on_action(cx.listener(|this, _: &ToggleLog, _, cx| {
-                if !this.editing(cx) {
-                    this.show_log = !this.show_log;
+                if this.editing(cx) {
+                    return;
                 }
+                this.show_log = !this.show_log;
             }))
             .child(
                 // Main content: config panel + plot/log
                 h_flex()
                     .flex_1()
-                    .size_full()
+                    .min_h_0()
                     .child(
                         div()
                             .w(px(400.0))
@@ -711,9 +740,25 @@ impl Render for DustApp {
                             .overflow_y_scrollbar()
                             .child(self.form.clone()),
                     )
-                    .child(right_panel),
+                    .child(
+                        div()
+                            .id("right-panel")
+                            .flex_1()
+                            .size_full()
+                            .on_click(move |_, window, _cx| {
+                                focus_handle.focus(window);
+                            })
+                            .child(right_panel),
+                    ),
             )
-            .child(footer)
+            .child(
+                div()
+                    .id("footer-click-area")
+                    .on_click(move |_, window, _cx| {
+                        focus_handle2.focus(window);
+                    })
+                    .child(footer),
+            )
     }
 }
 
@@ -791,15 +836,20 @@ fn main() {
                 let style = PlotStyle::from_theme(cx.theme());
                 let plot = cx.new(|_cx| Plot::new().grid(true).aspect_ratio(1.0).style(style));
 
-                let app_entity = cx.new(|_cx| DustApp {
-                    handle,
-                    form,
-                    plot,
-                    status_text: "Ready".into(),
-                    last_snapshot: Snapshot::default(),
-                    log_lines: Vec::new(),
-                    last_message: None,
-                    show_log: false,
+                let app_entity = cx.new(|cx| {
+                    let focus_handle = cx.focus_handle();
+                    focus_handle.focus(window);
+                    DustApp {
+                        handle,
+                        form,
+                        plot,
+                        focus_handle,
+                        status_text: "Ready".into(),
+                        last_snapshot: Snapshot::default(),
+                        log_lines: Vec::new(),
+                        last_message: None,
+                        show_log: false,
+                    }
                 });
 
                 cx.new(|cx| Root::new(app_entity, window, cx))
