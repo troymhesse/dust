@@ -4,7 +4,7 @@ use driver::command::{Command, DriverMode, Event};
 use driver::config::SimulationConfig;
 use driver::watch::Snapshot;
 use driver::worker::DriverHandle;
-use driver::{Driver, DriverState, PlotData, Solver, StepInfo, Validate};
+use driver::{Action, CliArgs, Driver, DriverState, Mode, PlotData, Solver, StepInfo, Validate};
 use gpui::{
     App, AppContext as _, Application, Context, Entity, InteractiveElement as _, IntoElement,
     KeyBinding, Menu, MenuItem, ParentElement, Render, StatefulInteractiveElement as _, Styled,
@@ -484,6 +484,19 @@ impl Render for DustApp {
 }
 
 fn main() {
+    let cli = match CliArgs::from_env() {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if cli.mode != Mode::Gui || cli.action != Action::Run {
+        driver::app::run::<Dust>(cli);
+        return;
+    }
+
     let app = Application::new();
 
     app.run(move |cx: &mut App| {

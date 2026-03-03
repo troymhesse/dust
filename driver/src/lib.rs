@@ -10,6 +10,7 @@ pub mod solver;
 pub mod watch;
 pub mod worker;
 
+pub use app::{Action, CliArgs, Mode};
 pub use config::{DriverConfig, SimulationConfig, build_nested, merge};
 pub use driver::{Driver, DriverState};
 pub use solver::{PlotData, Solver, StepInfo, Validate};

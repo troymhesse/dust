@@ -97,18 +97,6 @@ impl<S: Solver> Driver<S> {
         (driver, events)
     }
 
-    /// Convenience entry point: delegates to [`crate::app::run`].
-    pub fn run()
-    where
-        S: Send + 'static,
-        S::State: Send,
-        S::Physics: Send,
-        S::Initial: Send,
-        S::Compute: Send,
-    {
-        crate::app::run::<S>();
-    }
-
     /// Whether the driver is currently running (wants to step continuously).
     pub fn is_running(&self) -> bool {
         self.mode == DriverMode::Running
@@ -130,7 +118,11 @@ impl<S: Solver> Driver<S> {
             mode: self.mode,
             has_state: self.state.is_some(),
             iteration: self.driver_state.iteration,
-            time: self.state.as_ref().map(|s| self.solver.time(s)).unwrap_or(0.0),
+            time: self
+                .state
+                .as_ref()
+                .map(|s| self.solver.time(s))
+                .unwrap_or(0.0),
             status_text: self.status_text.clone(),
             linear,
             planar,
@@ -335,9 +327,10 @@ impl<S: Solver> Driver<S> {
                 for section in ["initial", "compute"] {
                     if let Some(incoming) = obj.get(section) {
                         if current.get(section) != Some(incoming) {
-                            return vec![Event::ConfigUpdated(Err(
-                                format!("{} config cannot be changed while state exists", section),
-                            ))];
+                            return vec![Event::ConfigUpdated(Err(format!(
+                                "{} config cannot be changed while state exists",
+                                section
+                            )))];
                         }
                     }
                 }

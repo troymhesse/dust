@@ -2,7 +2,8 @@
 //!
 //! Three-column layout: file browser, config editor, log/plot.
 
-use crate::command::{Command, DriverMode, Message};
+use crate::command::{Command, DriverMode, Event as DriverEvent};
+use crate::watch::Snapshot;
 use crate::worker::DriverHandle;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
@@ -26,26 +27,28 @@ pub fn run(handle: DriverHandle, disabled_paths: Vec<String>) {
     crossterm::execute!(std::io::stdout(), EnableMouseCapture).unwrap();
     let mut state = TuiState::new(disabled_paths);
 
-    // Request initial state and wait briefly for responses before first draw
+    // Request initial schema and config
     let _ = handle.cmd_tx.send(Command::QuerySchema);
     let _ = handle.cmd_tx.send(Command::QueryConfig);
-    let _ = handle.cmd_tx.send(Command::QueryStatus);
     std::thread::sleep(Duration::from_millis(50));
-    while let Ok(msg) = handle.msg_rx.try_recv() {
-        state.handle_message(msg, &handle);
+    while let Ok(event) = handle.event_rx.try_recv() {
+        state.handle_event(event, &handle);
     }
     state.refresh_files();
 
     loop {
-        // Drain messages (non-blocking)
-        while let Ok(msg) = handle.msg_rx.try_recv() {
-            if matches!(msg, Message::Finished) {
+        // Read snapshot (continuous data)
+        state.read_snapshot(&handle.snapshot);
+
+        // Drain events (non-blocking)
+        while let Ok(event) = handle.event_rx.try_recv() {
+            if matches!(event, DriverEvent::Finished) {
                 state.log_info("driver finished");
                 let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
                 ratatui::restore();
                 return;
             }
-            state.handle_message(msg, &handle);
+            state.handle_event(event, &handle);
         }
 
         // Periodic file refresh
@@ -241,13 +244,6 @@ impl TuiState {
         }
     }
 
-    fn log(&mut self, msg: impl Into<String>) {
-        self.log_lines.push(Line::styled(
-            msg.into(),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
     fn log_info(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         self.last_message = Some((msg.clone(), Color::Green));
@@ -307,60 +303,19 @@ impl TuiState {
     // Message handling
     // ========================================================================
 
-    fn handle_message(&mut self, msg: Message, handle: &DriverHandle) {
-        match msg {
-            Message::StepCompleted { display, .. } => {
-                self.log(display);
-                if matches!(self.right_tab, RightTab::Plot1D | RightTab::Plot2D) {
-                    let _ = handle.cmd_tx.send(Command::QueryPlotData);
-                }
-            }
-            Message::SimulationDone => {
-                self.log_info("simulation done");
-            }
-            Message::Status { mode, .. } => {
-                self.mode = mode;
-            }
-            Message::Config(v) => {
-                if let Some(ref schema) = self.schema_value {
-                    let schema = schema.clone();
-                    self.build_tree_state(&schema, &v);
-                } else {
-                    self.pending_config = Some(v);
-                }
-            }
-            Message::ConfigSections { .. } => {}
-            Message::Schema(v) => {
-                self.schema_value = Some(v);
-                if let Some(config) = self.pending_config.take() {
-                    let schema = self.schema_value.as_ref().unwrap().clone();
-                    self.build_tree_state(&schema, &config);
-                }
-            }
-            Message::ConfigUpdated(Ok(())) => {
-                self.log_info("config updated");
-                if matches!(self.right_tab, RightTab::Plot1D | RightTab::Plot2D) {
-                    let _ = handle.cmd_tx.send(Command::QueryPlotData);
-                }
-            }
-            Message::ConfigUpdated(Err(e)) => {
-                self.log_error(format!("config error: {}", e));
-                // Revert tree to driver's authoritative state
-                let _ = handle.cmd_tx.send(Command::QueryConfig);
-            }
-            Message::CheckpointWritten { path } => {
-                self.log_info(format!("wrote {}", path));
-                self.refresh_files();
-            }
-            Message::StateCreated => {
-                self.has_state = true;
-                self.update_filter();
-                self.log_info("state created");
-            }
-            Message::StateDestroyed => {
-                self.has_state = false;
-                self.update_filter();
-                self.log_info("state destroyed");
+    /// Read the latest snapshot from the watch channel and update TUI state.
+    fn read_snapshot(&mut self, snapshot: &crate::watch::Watch<Snapshot>) {
+        let snap = snapshot.read();
+
+        // Update mode
+        self.mode = snap.mode;
+
+        // Update has_state and filter
+        let new_has_state = snap.has_state;
+        if new_has_state != self.has_state {
+            self.has_state = new_has_state;
+            self.update_filter();
+            if !new_has_state {
                 self.linear_data.clear();
                 self.linear_keys.clear();
                 self.y_selected.clear();
@@ -368,80 +323,120 @@ impl TuiState {
                 self.planar_data.clear();
                 self.planar_keys.clear();
             }
-            Message::StateInfo {
-                driver_state,
-                solver_status,
-            } => {
-                let new_has_state = solver_status.is_some();
-                if new_has_state != self.has_state {
-                    self.has_state = new_has_state;
-                    self.update_filter();
-                }
-                let driver_val = serde_json::to_value(&driver_state).unwrap_or_default();
-                let solver_status_val =
-                    solver_status.unwrap_or(serde_json::Value::String("None".into()));
-                let mut info = String::new();
-                info.push_str("driver: ");
-                json_to_ron_string(&driver_val, &mut info, 0);
-                info.push_str("\n");
-                info.push_str("solver: ");
-                json_to_ron_string(&solver_status_val, &mut info, 0);
-                info.push_str("\n");
-                self.state_info_text = info;
-                self.refresh_files();
-                let _ = handle.cmd_tx.send(Command::QueryPlotData);
+        }
+
+        // Update state info text
+        if snap.has_state {
+            self.state_info_text =
+                format!("iteration: {}\ntime: {:.6e}", snap.iteration, snap.time,);
+            if !snap.status_text.is_empty() {
+                self.state_info_text.push('\n');
+                self.state_info_text.push_str(&snap.status_text);
             }
-            Message::ConfigWritten { path } => {
+        } else {
+            self.state_info_text = "no state".into();
+        }
+
+        // Update plot data from snapshot
+        self.update_plot_data(snap.linear, snap.planar);
+    }
+
+    /// Update plot data, preserving y-axis selections where possible.
+    fn update_plot_data(
+        &mut self,
+        linear: HashMap<String, Vec<f64>>,
+        planar: HashMap<String, (usize, usize, Vec<f64>)>,
+    ) {
+        let mut lkeys: Vec<String> = linear.keys().cloned().collect();
+        lkeys.sort();
+
+        // Rebuild y_selected, preserving selections for keys that still exist
+        let old_keys = std::mem::take(&mut self.linear_keys);
+        let old_sel = std::mem::take(&mut self.y_selected);
+        let mut new_sel = vec![false; lkeys.len()];
+        for (oi, ok) in old_keys.iter().enumerate() {
+            if oi < old_sel.len() && old_sel[oi] {
+                if let Some(ni) = lkeys.iter().position(|k| k == ok) {
+                    new_sel[ni] = true;
+                }
+            }
+        }
+        self.linear_keys = lkeys;
+        self.y_selected = new_sel;
+        self.linear_data = linear;
+
+        let n = self.linear_keys.len();
+        if n > 0 {
+            let xi = self.x_axis_index.min(n - 1);
+            self.x_axis_index = xi;
+            self.y_cursor = self.y_cursor.min(n - 1);
+        }
+
+        let mut pkeys: Vec<String> = planar.keys().cloned().collect();
+        pkeys.sort();
+        self.planar_keys = pkeys;
+        self.planar_data = planar;
+        let n = self.planar_keys.len();
+        if n > 0 {
+            let pi = self.planar_list.selected().unwrap_or(0).min(n - 1);
+            self.planar_list.select(Some(pi));
+        }
+    }
+
+    fn handle_event(&mut self, event: DriverEvent, handle: &DriverHandle) {
+        match event {
+            DriverEvent::SimulationDone => {
+                self.log_info("simulation done");
+            }
+            DriverEvent::Config(v) => {
+                if let Some(ref schema) = self.schema_value {
+                    let schema = schema.clone();
+                    self.build_tree_state(&schema, &v);
+                } else {
+                    self.pending_config = Some(v);
+                }
+            }
+            DriverEvent::ConfigSections { .. } => {}
+            DriverEvent::Schema(v) => {
+                self.schema_value = Some(v);
+                if let Some(config) = self.pending_config.take() {
+                    let schema = self.schema_value.as_ref().unwrap().clone();
+                    self.build_tree_state(&schema, &config);
+                }
+            }
+            DriverEvent::ConfigUpdated(Ok(())) => {
+                self.log_info("config updated");
+            }
+            DriverEvent::ConfigUpdated(Err(e)) => {
+                self.log_error(format!("config error: {}", e));
+                // Revert tree to driver's authoritative state
+                let _ = handle.cmd_tx.send(Command::QueryConfig);
+            }
+            DriverEvent::CheckpointWritten { path } => {
+                self.log_info(format!("wrote {}", path));
+                self.refresh_files();
+            }
+            DriverEvent::StateCreated => {
+                self.log_info("state created");
+            }
+            DriverEvent::StateDestroyed => {
+                self.log_info("state destroyed");
+            }
+            DriverEvent::ConfigWritten { path } => {
                 self.log_info(format!("wrote config to {}", path));
             }
-            Message::ConfigLoaded { path } => {
+            DriverEvent::ConfigLoaded { path } => {
                 self.log_info(format!("loaded config from {}", path));
                 let _ = handle.cmd_tx.send(Command::QueryConfig);
             }
-            Message::CheckpointLoaded { path } => {
+            DriverEvent::CheckpointLoaded { path } => {
                 self.log_info(format!("loaded checkpoint from {}", path));
                 let _ = handle.cmd_tx.send(Command::QueryConfig);
             }
-            Message::PlotData { linear, planar } => {
-                let mut lkeys: Vec<String> = linear.keys().cloned().collect();
-                lkeys.sort();
-
-                // Rebuild y_selected, preserving selections for keys that still exist
-                let old_keys = std::mem::take(&mut self.linear_keys);
-                let old_sel = std::mem::take(&mut self.y_selected);
-                let mut new_sel = vec![false; lkeys.len()];
-                for (oi, ok) in old_keys.iter().enumerate() {
-                    if oi < old_sel.len() && old_sel[oi] {
-                        if let Some(ni) = lkeys.iter().position(|k| k == ok) {
-                            new_sel[ni] = true;
-                        }
-                    }
-                }
-                self.linear_keys = lkeys;
-                self.y_selected = new_sel;
-                self.linear_data = linear;
-
-                let n = self.linear_keys.len();
-                if n > 0 {
-                    let xi = self.x_axis_index.min(n - 1);
-                    self.x_axis_index = xi;
-                    self.y_cursor = self.y_cursor.min(n - 1);
-                }
-
-                let mut pkeys: Vec<String> = planar.keys().cloned().collect();
-                pkeys.sort();
-                self.planar_keys = pkeys;
-                self.planar_data = planar;
-                let n = self.planar_keys.len();
-                if n > 0 {
-                    let pi = self.planar_list.selected().unwrap_or(0).min(n - 1);
-                    self.planar_list.select(Some(pi));
-                }
-            }
-            Message::Error(e) => {
+            DriverEvent::Error(e) => {
                 self.log_error(format!("error: {}", e));
             }
-            Message::Finished => {} // handled in main loop
+            DriverEvent::Finished => {} // handled in main loop
         }
     }
 
@@ -593,7 +588,13 @@ impl TuiState {
 
     fn handle_key_middle(&mut self, code: KeyCode) -> Option<Command> {
         match code {
-            KeyCode::Left | KeyCode::Right => {
+            KeyCode::Char('[') => {
+                self.middle_tab = match self.middle_tab {
+                    MiddleTab::Config => MiddleTab::State,
+                    MiddleTab::State => MiddleTab::Config,
+                };
+            }
+            KeyCode::Char(']') => {
                 self.middle_tab = match self.middle_tab {
                     MiddleTab::Config => MiddleTab::State,
                     MiddleTab::State => MiddleTab::Config,
@@ -606,7 +607,7 @@ impl TuiState {
 
     fn handle_key_left(&mut self, code: KeyCode) -> Option<Command> {
         match code {
-            KeyCode::Left | KeyCode::Right => {
+            KeyCode::Char('[') | KeyCode::Char(']') => {
                 self.file_tab = match self.file_tab {
                     FileTab::Configs => FileTab::Checkpoints,
                     FileTab::Checkpoints => FileTab::Configs,
@@ -656,25 +657,19 @@ impl TuiState {
 
     fn handle_key_right(&mut self, code: KeyCode) -> Option<Command> {
         match code {
-            KeyCode::Left => {
+            KeyCode::Char('[') => {
                 self.right_tab = match self.right_tab {
                     RightTab::Log => RightTab::Plot2D,
                     RightTab::Plot1D => RightTab::Log,
                     RightTab::Plot2D => RightTab::Plot1D,
                 };
-                if matches!(self.right_tab, RightTab::Plot1D | RightTab::Plot2D) {
-                    return Some(Command::QueryPlotData);
-                }
             }
-            KeyCode::Right => {
+            KeyCode::Char(']') => {
                 self.right_tab = match self.right_tab {
                     RightTab::Log => RightTab::Plot1D,
                     RightTab::Plot1D => RightTab::Plot2D,
                     RightTab::Plot2D => RightTab::Log,
                 };
-                if matches!(self.right_tab, RightTab::Plot1D | RightTab::Plot2D) {
-                    return Some(Command::QueryPlotData);
-                }
             }
             _ => match self.right_tab {
                 RightTab::Log => {}
@@ -1305,13 +1300,13 @@ fn build_footer_hints(state: &TuiState) -> Vec<(&'static str, &'static str)> {
     // Focus-specific hints
     match state.focus {
         Focus::Left => {
-            hints.push(("←→", "tab"));
+            hints.push(("[/]", "tab"));
             hints.push(("↑↓", "navigate"));
             hints.push(("Enter", "load"));
             hints.push(("Del", "delete"));
         }
         Focus::Middle => {
-            hints.push(("←→", "tab"));
+            hints.push(("[/]", "tab"));
             match state.middle_tab {
                 MiddleTab::Config => {
                     hints.push(("↑↓", "navigate"));
@@ -1322,7 +1317,7 @@ fn build_footer_hints(state: &TuiState) -> Vec<(&'static str, &'static str)> {
             }
         }
         Focus::Right => {
-            hints.push(("←→", "tab"));
+            hints.push(("[/]", "tab"));
             match state.right_tab {
                 RightTab::Log => {}
                 RightTab::Plot1D => {
@@ -1394,45 +1389,6 @@ fn draw_footer(frame: &mut Frame, state: &TuiState, area: Rect) {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-fn json_to_ron_string(v: &serde_json::Value, out: &mut String, indent: usize) {
-    use serde_json::Value;
-    let pad = "    ".repeat(indent);
-    match v {
-        Value::Null => out.push_str("None"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Number(n) => out.push_str(&n.to_string()),
-        Value::String(s) => {
-            out.push('"');
-            out.push_str(s);
-            out.push('"');
-        }
-        Value::Array(arr) => {
-            out.push_str("[\n");
-            for item in arr {
-                out.push_str(&pad);
-                out.push_str("    ");
-                json_to_ron_string(item, out, indent + 1);
-                out.push_str(",\n");
-            }
-            out.push_str(&pad);
-            out.push(']');
-        }
-        Value::Object(map) => {
-            out.push_str("(\n");
-            for (key, val) in map {
-                out.push_str(&pad);
-                out.push_str("    ");
-                out.push_str(key);
-                out.push_str(": ");
-                json_to_ron_string(val, out, indent + 1);
-                out.push_str(",\n");
-            }
-            out.push_str(&pad);
-            out.push(')');
-        }
-    }
-}
 
 fn scan_files(dir: &str, ext: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
