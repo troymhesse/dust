@@ -381,107 +381,67 @@ impl Render for DustApp {
 
         let status = self.status_text.clone();
         let running = self.running();
-
         let has_state = self.has_state();
-        let transport = if !has_state {
-            // No state: single "▶" button that creates state
-            h_flex().child(
-                div()
-                    .id("transport-create")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(cx.theme().primary)
-                    .text_color(cx.theme().primary_foreground)
-                    .text_sm()
-                    .child("⊕")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.send(Command::CreateState);
-                        cx.notify();
-                    })),
-            )
+
+        // Single fixed-width transport button: ⊕ create / ▶ play / ⏸ pause
+        // Shift-click for single step when paused with state
+        let transport_icon = if !has_state {
+            "⊕"
         } else if running {
-            // Running: "⏸" pause button
-            h_flex().child(
-                div()
-                    .id("transport-pause")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(cx.theme().primary)
-                    .text_color(cx.theme().primary_foreground)
-                    .text_sm()
-                    .child("⏸")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.send(Command::Pause);
-                        cx.notify();
-                    })),
-            )
+            "⏸"
         } else {
-            // Paused with state: split button "▶ │ ›"
-            h_flex()
-                .rounded_md()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .id("transport-play")
-                        .px_3()
-                        .py_1()
-                        .cursor_pointer()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .text_sm()
-                        .child("▶")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.send(Command::Run);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h_full()
-                        .bg(cx.theme().primary_foreground.opacity(0.3)),
-                )
-                .child(
-                    div()
-                        .id("transport-step")
-                        .px_3()
-                        .py_1()
-                        .cursor_pointer()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .text_sm()
-                        .child("▸")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.send(Command::Step);
-                            cx.notify();
-                        })),
-                )
+            "▶"
         };
 
-        let destroy = if has_state {
-            Some(
-                div()
-                    .id("destroy-btn")
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(cx.theme().secondary)
-                    .text_color(cx.theme().secondary_foreground)
-                    .text_xs()
-                    .child("✕")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.send(Command::DestroyState);
-                        cx.notify();
-                    })),
-            )
+        let transport = div()
+            .id("transport-btn")
+            .w(px(28.0))
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_center()
+            .bg(cx.theme().primary)
+            .text_color(cx.theme().primary_foreground)
+            .text_sm()
+            .child(transport_icon)
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, _cx| {
+                let shift = event.modifiers().shift;
+                if !this.has_state() {
+                    this.send(Command::CreateState);
+                } else if this.running() {
+                    this.send(Command::Pause);
+                } else if shift {
+                    this.send(Command::Step);
+                } else {
+                    this.send(Command::Run);
+                }
+            }));
+
+        // Always-visible destroy button, dimmed when no state
+        let (destroy_bg, destroy_fg) = if has_state {
+            (cx.theme().secondary, cx.theme().secondary_foreground)
         } else {
-            None
+            (
+                cx.theme().secondary.opacity(0.3),
+                cx.theme().muted_foreground.opacity(0.3),
+            )
         };
+        let destroy = div()
+            .id("destroy-btn")
+            .w(px(28.0))
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_center()
+            .text_xs()
+            .bg(destroy_bg)
+            .text_color(destroy_fg)
+            .child("✕")
+            .on_click(cx.listener(move |this, _, _, _cx| {
+                if this.has_state() {
+                    this.send(Command::DestroyState);
+                }
+            }));
 
         v_flex()
             .size_full()
@@ -495,7 +455,7 @@ impl Render for DustApp {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(transport)
-                    .children(destroy)
+                    .child(destroy)
                     .child(
                         div()
                             .pl_4()
