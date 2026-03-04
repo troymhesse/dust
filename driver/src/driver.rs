@@ -321,84 +321,64 @@ impl<S: Solver> Driver<S> {
     // ========================================================================
 
     fn update_config(&mut self, patch: Value) -> Vec<Event> {
-        if self.state.is_some() {
-            if let Some(obj) = patch.as_object() {
-                let current = serde_json::to_value(&self.config).unwrap_or_default();
-                for section in ["initial", "compute"] {
-                    if let Some(incoming) = obj.get(section) {
-                        if current.get(section) != Some(incoming) {
-                            return vec![Event::ConfigUpdated(Err(format!(
-                                "{} config cannot be changed while state exists",
-                                section
-                            )))];
-                        }
-                    }
-                }
-            }
+        let result = try_update_config(&mut self.config, patch);
+        match result {
+            Ok(new_config) => self.apply_config(new_config),
+            Err(e) => vec![Event::ConfigUpdated(Err(e))],
         }
-
-        let has_changes = patch.as_object().map_or(false, |m| !m.is_empty());
-        if has_changes {
-            let result = try_update_config(&mut self.config, patch);
-            if result.is_err() {
-                return vec![Event::ConfigUpdated(result)];
-            }
-        }
-
-        self.solver = self.new_solver();
-
-        if let Some(ref s) = self.state {
-            self.driver_state.catch_up_checkpoint_time(
-                self.solver.time(s),
-                self.config.driver.checkpoint_interval,
-            );
-        }
-
-        vec![Event::ConfigUpdated(Ok(())), self.config_sections()]
     }
 
     fn update_config_ron(&mut self, ron: &str) -> Vec<Event> {
-        let new_config: SimulationConfig<S> = match ron::from_str(ron) {
-            Ok(c) => c,
-            Err(e) => return vec![Event::ConfigUpdated(Err(format!("{}", e)))],
-        };
-
-        self.config = new_config;
-        self.solver = self.new_solver();
-
-        if let Some(ref s) = self.state {
-            self.driver_state.catch_up_checkpoint_time(
-                self.solver.time(s),
-                self.config.driver.checkpoint_interval,
-            );
+        match ron::from_str(ron) {
+            Ok(new_config) => self.apply_config(new_config),
+            Err(e) => vec![Event::ConfigUpdated(Err(format!("{}", e)))],
         }
-
-        vec![Event::ConfigUpdated(Ok(())), self.config_sections()]
     }
 
     fn update_config_section(&mut self, section: &str, ron: &str) -> Vec<Event> {
+        let mut new_config = self.config.clone();
         let err = |msg: String| vec![Event::ConfigUpdated(Err(msg))];
 
         match section {
             "driver" => match ron::from_str(ron) {
-                Ok(v) => self.config.driver = v,
+                Ok(v) => new_config.driver = v,
                 Err(e) => return err(format!("driver: {}", e)),
             },
             "physics" => match ron::from_str(ron) {
-                Ok(v) => self.config.physics = v,
+                Ok(v) => new_config.physics = v,
                 Err(e) => return err(format!("physics: {}", e)),
             },
             "initial" => match ron::from_str(ron) {
-                Ok(v) => self.config.initial = v,
+                Ok(v) => new_config.initial = v,
                 Err(e) => return err(format!("initial: {}", e)),
             },
             "compute" => match ron::from_str(ron) {
-                Ok(v) => self.config.compute = v,
+                Ok(v) => new_config.compute = v,
                 Err(e) => return err(format!("compute: {}", e)),
             },
             other => return err(format!("unknown section: {}", other)),
         }
 
+        self.apply_config(new_config)
+    }
+
+    /// Central config update: rejects changes to initial/compute while state
+    /// exists, then applies the new config, rebuilds the solver, and emits events.
+    fn apply_config(&mut self, new_config: SimulationConfig<S>) -> Vec<Event> {
+        if self.state.is_some() {
+            let old = serde_json::to_value(&self.config).unwrap_or_default();
+            let new = serde_json::to_value(&new_config).unwrap_or_default();
+            for section in ["initial", "compute"] {
+                if old.get(section) != new.get(section) {
+                    return vec![Event::ConfigUpdated(Err(format!(
+                        "{} config cannot be changed while state exists",
+                        section
+                    )))];
+                }
+            }
+        }
+
+        self.config = new_config;
         self.solver = self.new_solver();
 
         if let Some(ref s) = self.state {
@@ -503,16 +483,15 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
 }
 
 fn try_update_config<S: Solver>(
-    config: &mut SimulationConfig<S>,
+    config: &SimulationConfig<S>,
     patch: Value,
-) -> Result<(), String> {
-    let base = serde_json::to_value(&*config).map_err(|e| e.to_string())?;
+) -> Result<SimulationConfig<S>, String> {
+    let base = serde_json::to_value(config).map_err(|e| e.to_string())?;
     let merged = crate::config::merge(base, patch);
     let new_config: SimulationConfig<S> =
         serde_json::from_value(merged).map_err(|e| e.to_string())?;
     new_config.physics.validate()?;
     new_config.initial.validate()?;
     new_config.compute.validate()?;
-    *config = new_config;
-    Ok(())
+    Ok(new_config)
 }
