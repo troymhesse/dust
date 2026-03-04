@@ -22,7 +22,7 @@ use gpui_component::{
     v_flex,
 };
 use gpui_plot::{Plot, PlotStyle, Series, data_range};
-use gpui_schema::{NodeFilter, SchemaForm};
+use gpui_schema::{NodeFilter, SchemaForm, SchemaFormEvent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -330,6 +330,16 @@ impl Focusable for DustApp {
 }
 
 impl DustApp {
+    /// Subscribe to form change events to push config updates to the driver.
+    fn subscribe_form(&self, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.subscribe(&self.form, |this, form, _event: &SchemaFormEvent, cx| {
+            let value = form.read(cx).to_value();
+            this.config_source = ConfigSource::Form;
+            this.send(Command::UpdateConfig(value));
+        })
+        .detach();
+    }
+
     /// Read the latest snapshot, diff it, drain events, and perform
     /// app-specific updates (plot data, config filter, editor/form sync).
     fn read_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -427,9 +437,7 @@ impl DustApp {
                 compute,
             } => {
                 if self.config_source != ConfigSource::Editor {
-                    let ron = format!(
-                        "SimulationConfig(\n    driver: {driver},\n    physics: {physics},\n    initial: {initial},\n    compute: {compute},\n)"
-                    );
+                    let ron = assemble_config_ron(&driver, &physics, &initial, &compute);
                     self.editor.update(cx, |editor, cx| {
                         editor.set_value(ron, window, cx);
                     });
@@ -451,6 +459,7 @@ impl DustApp {
                         form
                     });
                     self.form = form;
+                    self.subscribe_form(window, cx);
                 }
                 self.config_source = ConfigSource::Driver;
             }
@@ -491,12 +500,6 @@ impl DustApp {
 impl Render for DustApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.read_snapshot(window, cx);
-
-        if self.form.read(cx).is_dirty() {
-            let value = self.form.read(cx).to_value();
-            self.config_source = ConfigSource::Form;
-            self.send(Command::UpdateConfig(value));
-        }
 
         let show_log = self.show_log.get();
 
@@ -644,6 +647,38 @@ impl Render for DustApp {
     }
 }
 
+/// Assemble individually pretty-printed RON sections into a single
+/// `SimulationConfig(...)` string with correct indentation.
+fn assemble_config_ron(driver: &str, physics: &str, initial: &str, compute: &str) -> String {
+    fn indent(section: &str, prefix: &str) -> String {
+        section
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                if i == 0 {
+                    line.to_string()
+                } else {
+                    format!("{prefix}{line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    let pad = "    ";
+    format!(
+        "SimulationConfig(\n\
+         {pad}driver: {},\n\
+         {pad}physics: {},\n\
+         {pad}initial: {},\n\
+         {pad}compute: {},\n\
+         )",
+        indent(driver, pad),
+        indent(physics, pad),
+        indent(initial, pad),
+        indent(compute, pad),
+    )
+}
+
 fn main() {
     let cli = match CliArgs::from_env() {
         Ok(cli) => cli,
@@ -731,7 +766,7 @@ fn main() {
                 let app_entity = cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window);
-                    DustApp {
+                    let app = DustApp {
                         handle,
                         form,
                         plot,
@@ -743,7 +778,9 @@ fn main() {
                         show_log: Rc::new(Cell::new(false)),
                         left_tab: LeftTab::Config,
                         config_source: ConfigSource::Driver,
-                    }
+                    };
+                    app.subscribe_form(window, cx);
+                    app
                 });
 
                 cx.new(|cx| Root::new(app_entity, window, cx))
