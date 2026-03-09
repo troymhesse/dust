@@ -1612,6 +1612,7 @@ dependencies = [
  "gpui-component",
  "gpui-plot",
  "gpui-schema",
+ "libm",
  "ron",
  "schemars",
  "serde",
@@ -2576,6 +2577,7 @@ dependencies = [
 [[package]]
 name = "gpui-plot"
 version = "0.1.0"
+source = "git+https://github.com/harc-lang/gpui-plot.git#8597c654df270a3141233d2b5d4535ad5b777e50"
 dependencies = [
  "anyhow",
  "gpui",
@@ -2585,6 +2587,7 @@ dependencies = [
 [[package]]
 name = "gpui-schema"
 version = "0.1.0"
+source = "git+https://github.com/harc-lang/gpui-schema.git#bc67e843ef86eca9acf005157ff6ca8371dcafcd"
 dependencies = [
  "anyhow",
  "gpui",
@@ -4684,11 +4687,11 @@ dependencies = [
 
 [[package]]
 name = "proc-macro-crate"
-version = "3.4.0"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219cb19e96be00ab2e37d6e299658a0cfa83e52429179969b0f0121b4ac46983"
+checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.23.10+spec-1.0.0",
+ "toml_edit 0.25.3+spec-1.1.0",
 ]
 
 [[package]]
@@ -4847,9 +4850,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.44"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
@@ -5576,6 +5579,7 @@ dependencies = [
 [[package]]
 name = "schema-tui"
 version = "0.1.0"
+source = "git+https://github.com/harc-lang/schema-tui.git#5a8be0330d32d96ebb99227e18e40e9c86de0fd8"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -6677,6 +6681,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_datetime"
+version = "1.0.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32c2555c699578a4f59f0cc68e5116c8d7cabbd45e1409b989d4be085b53f13e"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "toml_edit"
 version = "0.22.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6692,12 +6705,12 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.23.10+spec-1.0.0"
+version = "0.25.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84c8b9f757e028cee9fa244aea147aab2a9ec09d5325a9b01e0a49730c2b5269"
+checksum = "a0a07913e63758bc95142d9863a5a45173b71515e68b690cad70cf99c3255ce1"
 dependencies = [
  "indexmap",
- "toml_datetime 0.7.5+spec-1.1.0",
+ "toml_datetime 1.0.0+spec-1.1.0",
  "toml_parser",
  "winnow",
 ]
@@ -7149,13 +7162,13 @@ checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "uds_windows"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89daebc3e6fd160ac4aa9fc8b3bf71e1f74fbf92367ae71fb83a037e8bf164b9"
+checksum = "51b70b87d15e91f553711b40df3048faf27a7a04e01e0ddc0cf9309f0af7c2ca"
 dependencies = [
  "memoffset",
  "tempfile",
- "winapi",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

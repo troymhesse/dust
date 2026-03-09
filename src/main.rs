@@ -1,5 +1,7 @@
 //! Particle simulation with GPUI visualization.
 
+use std::f64::consts::PI;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,6 +16,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, Menu, MenuItem, ParentElement, Render,
     StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px, size,
 };
+use gpui_component::switch::{self, Switch};
 use gpui_component::{
     ActiveTheme, Root,
     input::{Input, InputState},
@@ -50,6 +53,38 @@ enum ConfigSource {
 // Config types
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+struct Vec2 {
+    x: f64, 
+    y: f64, 
+}
+
+impl Default for Vec2 {
+    fn default() -> Self {
+        Self { x: 0.0, y: 0.0 }
+    }
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+enum CentralObject {
+    Single{ mass: f64 },
+    Binary{ mass: f64, q: f64, a: f64, e: Vec2 },
+}
+
+
+impl Default for CentralObject {
+    fn default() -> Self {
+        Self::Binary {
+            mass: 1.0, 
+            q: 0.1, 
+            a: 0.5, 
+            e: Vec2::default(), 
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct DustPhysics {
@@ -61,6 +96,8 @@ struct DustPhysics {
     softening: f64,
     /// Mass of the central object
     central_mass: f64,
+    /// Type of central object
+    central_object: CentralObject, 
 }
 
 impl Default for DustPhysics {
@@ -70,6 +107,7 @@ impl Default for DustPhysics {
             dt: 0.001,
             softening: 0.01,
             central_mass: 1.0,
+            central_object: CentralObject::default(), 
         }
     }
 }
@@ -172,19 +210,144 @@ impl NodeFilter for DustFilter {
 // Solver
 // ============================================================================
 
+fn magnitude(v: [f64; 2]) -> f64 {
+    v[0] * v[0] + v[1] * v[1]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct AnomalyParams {
+    mass: f64, 
+    q: f64, 
+    a: f64, 
+    e: Vec2, 
+    mean_anom: f64, 
+}
+
+impl Default for AnomalyParams {
+    fn default() -> Self {
+        Self {
+            mass: 1.0, 
+            q: 0.1, 
+            a: 1.0, 
+            e: Vec2{ x: 0.0, y: 0.0 }, 
+            mean_anom: 0.0, 
+        }
+    }
+}
+
+impl AnomalyParams {
+    /// Magnitude of eccentricity vector
+    fn e_mag(&self) -> f64 {
+        self.e.x * self.e.x + self.e.y * self.e.y
+    }
+    /// Mean angular motion of object (angular frequency)
+    fn mean_angular_motion(&self) -> f64 {
+        (self.mass / self.a / self.a / self.a).sqrt()
+    }
+    /// Period of object motion
+    fn period(&self) -> f64 {
+        2. * PI / self.mean_angular_motion()
+    }
+    /// Kepler's equation
+    fn f(&self, ecc_anom: f64) -> f64 {
+        ecc_anom - self.e_mag() * ecc_anom.sin() - self.mean_anom
+    }
+    /// Derivative of Kepler's equation (wrt E)
+    fn fprime(&self, ecc_anom: f64) -> f64 {
+        1. - self.e_mag() * ecc_anom.cos()
+    }
+    /// Calculate eccentric anomaly E for object orbit
+    fn eccentric_anomaly(&mut self, time_since_periapse: f64) -> f64 {
+        let w = self.mean_angular_motion();
+        let p = self.period();
+        let t = time_since_periapse - p * (time_since_periapse / p).floor();
+        self.mean_anom = w * t;
+        let ecc_anom = newton_raphson(|ecc_anom| self.f(ecc_anom), |ecc_anom| self.fprime(ecc_anom), self.mean_anom);
+        
+        ecc_anom
+    }
+}
+
+fn newton_raphson<F, G>(f: F, fprime: G, mut x: f64) -> f64 
+where 
+    F: Fn(f64) -> f64, 
+    G: Fn(f64) -> f64, 
+{
+    let mut n = 0;
+    while f(x).abs() > 1e-15 {
+        x -= f(x) / fprime(x);
+        n += 1;
+        if n > 10 {
+            panic!("newton_raphson: no solution!");
+        }
+    }
+    x
+}
+
+/// Position of primary and secondary objects in binary configuration; origin at CM
+fn orbital_state(mut p: AnomalyParams, time_since_periapse: f64) -> ([f64; 2], [f64; 2]) {
+    let e_mag = p.e_mag();
+    let ecc_anom = p.eccentric_anomaly(time_since_periapse);
+    let x = p.a * (ecc_anom.cos() - e_mag);
+    let y = p.a * (1. - e_mag * e_mag).sqrt() * ecc_anom.sin();
+    // Rotate orbit based on eccentricity vector with argument of periapsis ω
+    let arg_of_peri = libm::atan2(p.e.y, p.e.x);
+    let x_rot = x * arg_of_peri.cos() - y * arg_of_peri.sin();
+    let y_rot = x * arg_of_peri.sin() + y * arg_of_peri.cos();
+    // Secondary position
+    let x2 = - x_rot / (1. + p.q);
+    let y2 = - y_rot / (1. + p.q);
+    // Primary position
+    let x1 = - x2 * p.q;
+    let y1 = - y2 * p.q;
+
+    ([x1, y1], [x2, y2])
+}
+
+
 struct Dust {
     physics: DustPhysics,
     initial: DustInitial,
 }
 
 impl Dust {
-    /// Compute gravitational acceleration from central mass at origin.
-    fn acceleration(&self, x: f64, y: f64) -> (f64, f64) {
-        let eps = self.physics.softening;
-        let r2 = x * x + y * y + eps * eps;
-        let r = r2.sqrt();
-        let a = -self.physics.central_mass / (r * r2);
-        (a * x, a * y)
+    /// Compute gravitational acceleration. 
+    fn acceleration(&self, x: f64, y: f64, state: &State) -> (f64, f64) {
+        match self.physics.central_object {
+            CentralObject::Single { mass } => {
+                let eps = self.physics.softening;
+                let r2 = x * x + y * y + eps * eps;
+                let r = r2.sqrt();
+                let acc = -mass / (r * r2);
+                (acc * x, acc * y) 
+            }
+            CentralObject::Binary { mass, q, a, e } => {
+                let p = AnomalyParams{ 
+                    mass: mass, 
+                    q: q, 
+                    a: a, 
+                    e: e, 
+                    mean_anom: 0.0, 
+                };
+                let eps = self.physics.softening;
+                let m1 = mass / (1. + p.q);
+                let m2 = p.q * m1;
+                let time_since_periapse = state.time;
+                let (r1, r2) = orbital_state(p, time_since_periapse);
+                let r1_mag = magnitude([x - r1[0], y - r1[1]]);
+                let r2_mag = magnitude([x - r2[0], y - r2[1]]);
+                let sep1_sq = r1_mag * r1_mag + eps * eps;
+                let sep2_sq = r2_mag * r2_mag + eps * eps;
+
+                let acc1 = - m1 / sep1_sq / sep1_sq.sqrt();
+                let acc2 = - m2 / sep2_sq / sep2_sq.sqrt();
+                let a1 = (acc1 * (x - r1[0]), acc1 * (y - r1[1]));
+                let a2 = (acc2 * (x - r2[0]), acc2 * (y - r2[1]));
+
+                (a1.0 + a2.0, a1.1 + a2.1)
+            }
+        }
     }
 }
 
@@ -266,7 +429,7 @@ impl Solver for Dust {
 
         // Leapfrog (kick-drift-kick)
         for i in 0..n {
-            let (ax, ay) = self.acceleration(state.x[i], state.y[i]);
+            let (ax, ay) = self.acceleration(state.x[i], state.y[i], &state);
             state.vx[i] += 0.5 * dt * ax;
             state.vy[i] += 0.5 * dt * ay;
         }
@@ -275,7 +438,7 @@ impl Solver for Dust {
             state.y[i] += dt * state.vy[i];
         }
         for i in 0..n {
-            let (ax, ay) = self.acceleration(state.x[i], state.y[i]);
+            let (ax, ay) = self.acceleration(state.x[i], state.y[i], &state);
             state.vx[i] += 0.5 * dt * ax;
             state.vy[i] += 0.5 * dt * ay;
         }
