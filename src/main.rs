@@ -88,6 +88,8 @@ impl Default for CentralObject {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct DustPhysics {
+    /// Initial simulation time
+    tstart: f64, 
     /// Final simulation time
     tfinal: f64,
     /// Time step
@@ -103,6 +105,7 @@ struct DustPhysics {
 impl Default for DustPhysics {
     fn default() -> Self {
         Self {
+            tstart: 0.0, 
             tfinal: 10.0,
             dt: 0.001,
             softening: 0.01,
@@ -404,7 +407,7 @@ impl Solver for Dust {
         }
 
         State {
-            time: 0.0,
+            time: self.physics.tstart,
             x,
             y,
             vx,
@@ -473,6 +476,9 @@ impl Solver for Dust {
 // GPUI Application
 // ============================================================================
 
+fn rgb_tuple(r: u8, g: u8, b: u8) -> gpui::Rgba {
+    gpui::rgb((r as u32) << 16 | (g as u32) << 8 | (b as u32))
+}
 struct DustApp {
     handle: DriverHandle,
     form: Entity<SchemaForm>,
@@ -485,6 +491,7 @@ struct DustApp {
     show_log: Rc<Cell<bool>>,
     left_tab: LeftTab,
     config_source: ConfigSource,
+    binary_params: Option<AnomalyParams>, 
 }
 
 impl Focusable for DustApp {
@@ -526,13 +533,34 @@ impl DustApp {
         // App-specific: update plot data (preserves pan/zoom view state)
         if diff.iteration_advanced || diff.state_changed {
             let snap = self.snapshot_reader.snapshot();
+            let time = snap.time;
             let style = PlotStyle::from_theme(cx.theme());
+            let mut star_series = Vec::new();
+            if let Some(params) = self.binary_params.clone() {
+                let (r1, r2) = orbital_state(params, time);
+                star_series.push(
+                    Series::scatter(vec![r1[0]], vec![r1[1]])
+                        .label("primary")
+                        .marker_radius(6.0)
+                        .color(rgb_tuple(255, 220, 120))
+                );
+                star_series.push(
+                    Series::scatter(vec![r2[0]], vec![r2[1]])
+                        .label("secondary")
+                        .marker_radius(5.0)
+                        .color(rgb_tuple(255, 149, 120))
+                );
+            }
             let first_data = diff.state_changed && snap.has_state;
             if let (Some(x), Some(y)) = (snap.linear.get("x"), snap.linear.get("y")) {
                 self.plot.update(cx, |plot, cx| {
-                    plot.set_series(vec![
-                        Series::scatter(x.clone(), y.clone()).label("particles"),
-                    ]);
+                    let mut series = vec![
+                        Series::scatter(x.clone(), y.clone())
+                            .label("particles")
+                            .marker_radius(1.5),
+                    ];
+                    series.extend(star_series);
+                    plot.set_series(series);
                     plot.set_style(style);
                     if first_data {
                         let (xmin, xmax) = data_range(x);
@@ -610,6 +638,19 @@ impl DustApp {
             }
             // Full config JSON — update the form unless it was the source
             DriverEvent::Config(value) => {
+                if let Ok(config) = serde_json::from_value::<SimulationConfig<Dust>>(value.clone()) {
+                    if let CentralObject::Binary { mass, q, a, e } = config.physics.central_object {
+                        self.binary_params = Some(AnomalyParams {
+                            mass,
+                            q,
+                            a,
+                            e,
+                            mean_anom: 0.0,
+                        });
+                    } else {
+                        self.binary_params = None;
+                    }
+                }
                 if self.config_source != ConfigSource::Form {
                     let form = cx.new(|cx| {
                         let mut form = SchemaForm::new(&self.schema, &value, window, cx);
@@ -942,6 +983,7 @@ fn main() {
                         show_log: Rc::new(Cell::new(false)),
                         left_tab: LeftTab::Config,
                         config_source: ConfigSource::Driver,
+                        binary_params: None, 
                     };
                     app.subscribe_form(window, cx);
                     app
