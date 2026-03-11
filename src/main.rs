@@ -16,7 +16,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, Menu, MenuItem, ParentElement, Render,
     StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px, size,
 };
-use gpui_component::switch::{self, Switch};
+// use gpui_component::switch::{self, Switch};
 use gpui_component::{
     ActiveTheme, Root,
     input::{Input, InputState},
@@ -27,6 +27,7 @@ use gpui_component::{
 };
 use gpui_plot::{Plot, PlotStyle, Series, data_range};
 use gpui_schema::{NodeFilter, SchemaForm, SchemaFormEvent};
+use libm::atan2;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +123,8 @@ impl Validate for DustPhysics {}
 struct DustInitial {
     /// Number of particles
     num_particles: usize,
+    /// Position of center of disk
+    disk_center: DiskCenter, 
     /// Initial condition setup
     setup: DustSetup,
 }
@@ -130,6 +133,7 @@ impl Default for DustInitial {
     fn default() -> Self {
         Self {
             num_particles: 1000,
+            disk_center: DiskCenter::Arbitrary { x: 0.0, y: 0.0 }, 
             setup: DustSetup::Ring,
         }
     }
@@ -143,6 +147,13 @@ enum DustSetup {
     Ring,
     /// Particles in a randomized disk
     RandomDisk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+enum DiskCenter {
+    Primary, 
+    Secondary, 
+    Arbitrary{ x: f64, y: f64 }, 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -214,7 +225,7 @@ impl NodeFilter for DustFilter {
 // ============================================================================
 
 fn magnitude(v: [f64; 2]) -> f64 {
-    v[0] * v[0] + v[1] * v[1]
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -373,20 +384,60 @@ impl Solver for Dust {
         let mut y = Vec::with_capacity(n);
         let mut vx = Vec::with_capacity(n);
         let mut vy = Vec::with_capacity(n);
-
+        
+        let r1: [f64; 2];
+        let r2: [f64; 2];
+        let rshift: [f64; 2];
+        let vshift: [f64; 2];
+        let mshift: f64;
+        match self.physics.central_object {
+            CentralObject::Binary { mass, q, a, e } => {
+                let p = AnomalyParams { mass: mass, q: q, a: a, e: e, mean_anom: 0.0 };
+                (r1, r2) = orbital_state(p, self.physics.tstart);
+                let r12 = [r1[0] + r2[0], r1[1] + r2[1]];
+                let theta1 = atan2(r1[1], r1[0]);
+                let theta2 = atan2(r2[1], r2[0]);
+                match self.initial.disk_center {
+                    DiskCenter::Primary => {
+                        mshift = mass / (1. + q);
+                        let v1 = (mshift * q / magnitude(r12)).sqrt();
+                        rshift = r1;
+                        vshift = [- v1 * theta1.sin(), v1 * theta1.cos()];
+                        // vshift = [0.0, 0.0];
+                    }
+                    DiskCenter::Secondary => {
+                        mshift = mass * q / (1. + q);
+                        let v2 = (mshift / q / magnitude(r12)).sqrt();
+                        rshift = r2;
+                        vshift = [- v2 * theta2.sin(), v2 * theta2.cos()];
+                    }
+                    DiskCenter::Arbitrary { x, y } => {
+                        rshift = [x, y];
+                        vshift = [0.0, 0.0];
+                        mshift = mass;
+                    }
+                }
+                    }
+                    CentralObject::Single { mass } => {
+                        rshift = [0.0, 0.0];
+                        vshift = [0.0, 0.0];
+                        mshift = mass;
+                    }
+                }
+        
         match self.initial.setup {
             DustSetup::Ring => {
                 for i in 0..n {
                     let theta = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
-                    let r = 1.0;
-                    let px = r * theta.cos();
-                    let py = r * theta.sin();
+                    let r = 0.1;
+                    let px = r * theta.cos() + rshift[0];
+                    let py = r * theta.sin() + rshift[1];
                     // Circular orbital velocity: v = sqrt(GM/r)
-                    let v = (self.physics.central_mass / r).sqrt();
+                    let v = (mshift / r).sqrt();
                     x.push(px);
                     y.push(py);
-                    vx.push(-v * theta.sin());
-                    vy.push(v * theta.cos());
+                    vx.push(-v * theta.sin() + vshift[0]);
+                    vy.push(v * theta.cos() + vshift[1]);
                 }
             }
             DustSetup::RandomDisk => {
@@ -395,13 +446,13 @@ impl Solver for Dust {
                 for i in 0..n {
                     let r = 0.3 + 0.7 * (i as f64 / n as f64).sqrt();
                     let theta = 2.0 * std::f64::consts::PI * (i as f64 * phi);
-                    let px = r * theta.cos();
-                    let py = r * theta.sin();
-                    let v = (self.physics.central_mass / r).sqrt();
+                    let px = r * theta.cos() + rshift[0];
+                    let py = r * theta.sin() + rshift[1];
+                    let v = (mshift / r).sqrt();
                     x.push(px);
                     y.push(py);
-                    vx.push(-v * theta.sin());
-                    vy.push(v * theta.cos());
+                    vx.push(-v * theta.sin() + vshift[0]);
+                    vy.push(v * theta.cos() + vshift[1]);
                 }
             }
         }
