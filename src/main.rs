@@ -97,8 +97,6 @@ struct DustPhysics {
     dt: f64,
     /// Gravitational softening length
     softening: f64,
-    /// Mass of the central object
-    central_mass: f64,
     /// Type of central object
     central_object: CentralObject, 
 }
@@ -110,7 +108,6 @@ impl Default for DustPhysics {
             tfinal: 10.0,
             dt: 0.001,
             softening: 0.01,
-            central_mass: 1.0,
             central_object: CentralObject::default(), 
         }
     }
@@ -351,11 +348,11 @@ impl Dust {
                 let (r1, r2) = orbital_state(p, time_since_periapse);
                 let r1_mag = magnitude([x - r1[0], y - r1[1]]);
                 let r2_mag = magnitude([x - r2[0], y - r2[1]]);
-                let sep1_sq = r1_mag * r1_mag + eps * eps;
-                let sep2_sq = r2_mag * r2_mag + eps * eps;
+                let r1_sq = r1_mag * r1_mag + eps * eps;
+                let r2_sq = r2_mag * r2_mag + eps * eps;
 
-                let acc1 = - m1 / sep1_sq / sep1_sq.sqrt();
-                let acc2 = - m2 / sep2_sq / sep2_sq.sqrt();
+                let acc1 = - m1 / r1_sq / r1_sq.sqrt();
+                let acc2 = - m2 / r2_sq / r2_sq.sqrt();
                 let a1 = (acc1 * (x - r1[0]), acc1 * (y - r1[1]));
                 let a2 = (acc2 * (x - r2[0]), acc2 * (y - r2[1]));
 
@@ -403,7 +400,6 @@ impl Solver for Dust {
                         let v1 = (mshift * q / magnitude(r12)).sqrt();
                         rshift = r1;
                         vshift = [- v1 * theta1.sin(), v1 * theta1.cos()];
-                        // vshift = [0.0, 0.0];
                     }
                     DiskCenter::Secondary => {
                         mshift = mass * q / (1. + q);
