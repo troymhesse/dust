@@ -1,6 +1,7 @@
 //! Particle simulation with GPUI visualization.
 
 use std::f64::consts::PI;
+use std::ops::{Add, Sub, Mul};
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -51,7 +52,7 @@ enum ConfigSource {
 }
 
 // ============================================================================
-// Config types
+// Vector types
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -66,11 +67,71 @@ impl Default for Vec2 {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+struct Vec3 {
+    x: f64, 
+    y: f64,
+    z: f64, 
+}
+
+impl Default for Vec3 {
+    fn default() -> Self {
+        Self { x: 0.0, y: 0.0, z: 0.0 }
+    }
+}
+
+impl Add for Vec3 {
+    type Output = Self;
+    fn add(self, vec: Vec3) -> Self {
+        Vec3 {
+            x: self.x + vec.x, 
+            y: self.y + vec.y, 
+            z: self.z + vec.z, 
+        }
+    }
+}
+impl Sub for Vec3 {
+    type Output = Self;
+    fn sub(self, vec: Vec3) -> Self {
+        Vec3 {
+            x: self.x - vec.x, 
+            y: self.y - vec.y, 
+            z: self.z - vec.z, 
+        }
+    }
+}
+impl Mul<f64> for Vec3 {
+    type Output = Self;
+    fn mul(self, c: f64) -> Self {
+        Vec3 {
+            x: c * self.x, 
+            y: c * self.y, 
+            z: c * self.z, 
+        }
+    }
+}
+
+impl Vec3 {
+    fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x: x, y: y, z: z}
+    }
+    fn dot(&self, vec: Vec3) -> f64 {
+        self.x * vec.x + self.y * vec.y + self.z * vec.z
+    }
+    fn mag(&self) -> f64 {
+        self.dot(*self)
+    }
+}
+
+// ============================================================================
+// Config types
+// ============================================================================
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 enum CentralObject {
     Single{ mass: f64 },
-    Binary{ mass: f64, q: f64, a: f64, e: Vec2 },
+    Binary{ mass: f64, q: f64, a: f64, e: Vec2, i: f64 },
 }
 
 
@@ -81,6 +142,7 @@ impl Default for CentralObject {
             q: 0.1, 
             a: 0.5, 
             e: Vec2::default(), 
+            i: 0.0,
         }
     }
 }
@@ -130,7 +192,7 @@ impl Default for DustInitial {
     fn default() -> Self {
         Self {
             num_particles: 1000,
-            disk_center: DiskCenter::Arbitrary { x: 0.0, y: 0.0 }, 
+            disk_center: DiskCenter::Arbitrary { x: 0.0, y: 0.0, z: 0.0 }, 
             setup: DustSetup::Ring,
         }
     }
@@ -150,7 +212,7 @@ enum DustSetup {
 enum DiskCenter {
     Primary, 
     Secondary, 
-    Arbitrary{ x: f64, y: f64 }, 
+    Arbitrary{ x: f64, y: f64, z: f64 }, 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -174,8 +236,10 @@ struct State {
     time: f64,
     x: Vec<f64>,
     y: Vec<f64>,
+    z: Vec<f64>,
     vx: Vec<f64>,
     vy: Vec<f64>,
+    vz: Vec<f64>,
 }
 
 #[derive(Serialize)]
@@ -232,6 +296,7 @@ struct AnomalyParams {
     q: f64, 
     a: f64, 
     e: Vec2, 
+    i: f64,
     mean_anom: f64, 
 }
 
@@ -242,6 +307,7 @@ impl Default for AnomalyParams {
             q: 0.1, 
             a: 1.0, 
             e: Vec2{ x: 0.0, y: 0.0 }, 
+            i: 0.0,
             mean_anom: 0.0, 
         }
     }
@@ -297,23 +363,31 @@ where
 }
 
 /// Position of primary and secondary objects in binary configuration; origin at CM
-fn orbital_state(mut p: AnomalyParams, time_since_periapse: f64) -> ([f64; 2], [f64; 2]) {
+fn orbital_state(mut p: AnomalyParams, time_since_periapse: f64) -> (Vec3, Vec3) {
     let e_mag = p.e_mag();
     let ecc_anom = p.eccentric_anomaly(time_since_periapse);
     let x = p.a * (ecc_anom.cos() - e_mag);
     let y = p.a * (1. - e_mag * e_mag).sqrt() * ecc_anom.sin();
-    // Rotate orbit based on eccentricity vector with argument of periapsis ω
+    let z = 0.0;
+    // Rotate orbit based on inclination (i) wrt disk plane
+    let x_rot_i = x * p.i.cos() - z * p.i.sin();
+    let y_rot_i = y;
+    let z_rot_i = x * p.i.sin() + z * p.i.cos();
+    // Rotate orbit based on eccentricity vector with argument of periapsis (ω)
     let arg_of_peri = libm::atan2(p.e.y, p.e.x);
-    let x_rot = x * arg_of_peri.cos() - y * arg_of_peri.sin();
-    let y_rot = x * arg_of_peri.sin() + y * arg_of_peri.cos();
+    let x_rot_w = x_rot_i * arg_of_peri.cos() - y_rot_i * arg_of_peri.sin();
+    let y_rot_w = x_rot_i * arg_of_peri.sin() + y_rot_i * arg_of_peri.cos();
+    let z_rot_w = z_rot_i;
     // Secondary position
-    let x2 = - x_rot / (1. + p.q);
-    let y2 = - y_rot / (1. + p.q);
+    let x2 = - x_rot_w / (1. + p.q);
+    let y2 = - y_rot_w / (1. + p.q);
+    let z2 = z_rot_w / (1. + p.q);
     // Primary position
     let x1 = - x2 * p.q;
     let y1 = - y2 * p.q;
+    let z1 = - z2 * p.q;
 
-    ([x1, y1], [x2, y2])
+    (Vec3{ x: x1, y: y1, z: z1} , Vec3{ x: x2, y: y2, z: z2 })
 }
 
 
@@ -333,12 +407,13 @@ impl Dust {
                 let acc = -mass / (r * r2);
                 (acc * x, acc * y) 
             }
-            CentralObject::Binary { mass, q, a, e } => {
+            CentralObject::Binary { mass, q, a, e, i } => {
                 let p = AnomalyParams{ 
                     mass: mass, 
                     q: q, 
                     a: a, 
                     e: e, 
+                    i: i,
                     mean_anom: 0.0, 
                 };
                 let eps = self.physics.softening;
@@ -346,15 +421,15 @@ impl Dust {
                 let m2 = p.q * m1;
                 let time_since_periapse = state.time;
                 let (r1, r2) = orbital_state(p, time_since_periapse);
-                let r1_mag = magnitude([x - r1[0], y - r1[1]]);
-                let r2_mag = magnitude([x - r2[0], y - r2[1]]);
+                let r1_mag = magnitude([x - r1.x, y - r1.y]);
+                let r2_mag = magnitude([x - r2.x, y - r2.y]);
                 let r1_sq = r1_mag * r1_mag + eps * eps;
                 let r2_sq = r2_mag * r2_mag + eps * eps;
 
                 let acc1 = - m1 / r1_sq / r1_sq.sqrt();
                 let acc2 = - m2 / r2_sq / r2_sq.sqrt();
-                let a1 = (acc1 * (x - r1[0]), acc1 * (y - r1[1]));
-                let a2 = (acc2 * (x - r2[0]), acc2 * (y - r2[1]));
+                let a1 = (acc1 * (x - r1.x), acc1 * (y - r1.y));
+                let a2 = (acc2 * (x - r2.x), acc2 * (y - r2.y));
 
                 (a1.0 + a2.0, a1.1 + a2.1)
             }
@@ -379,44 +454,46 @@ impl Solver for Dust {
         let n = self.initial.num_particles;
         let mut x = Vec::with_capacity(n);
         let mut y = Vec::with_capacity(n);
+        let mut z: Vec<f64> = Vec::with_capacity(n);
         let mut vx = Vec::with_capacity(n);
         let mut vy = Vec::with_capacity(n);
+        let mut vz: Vec<f64> = Vec::with_capacity(n);
         
-        let r1: [f64; 2];
-        let r2: [f64; 2];
-        let rshift: [f64; 2];
-        let vshift: [f64; 2];
+        let r1: Vec3;
+        let r2: Vec3;
+        let rshift: Vec3;
+        let vshift: Vec3;
         let mshift: f64;
         match self.physics.central_object {
-            CentralObject::Binary { mass, q, a, e } => {
-                let p = AnomalyParams { mass: mass, q: q, a: a, e: e, mean_anom: 0.0 };
+            CentralObject::Binary { mass, q, a, e, i } => {
+                let p = AnomalyParams { mass: mass, q: q, a: a, e: e, mean_anom: 0.0, i: i };
                 (r1, r2) = orbital_state(p, self.physics.tstart);
-                let r12 = [r1[0] + r2[0], r1[1] + r2[1]];
-                let theta1 = atan2(r1[1], r1[0]);
-                let theta2 = atan2(r2[1], r2[0]);
+                let r12 = r2 - r1;
+                let theta1 = atan2(r1.y, r1.x);
+                let theta2 = atan2(r2.y, r2.x);
                 match self.initial.disk_center {
                     DiskCenter::Primary => {
                         mshift = mass / (1. + q);
-                        let v1 = (mshift * q / magnitude(r12)).sqrt();
+                        let v1 = (mshift * q / r12.mag()).sqrt();
                         rshift = r1;
-                        vshift = [- v1 * theta1.sin(), v1 * theta1.cos()];
+                        vshift = Vec3::new(- v1 * theta1.sin(), v1 * theta1.cos(),0.);
                     }
                     DiskCenter::Secondary => {
                         mshift = mass * q / (1. + q);
-                        let v2 = (mshift / q / magnitude(r12)).sqrt();
+                        let v2 = (mshift / q / r12.mag()).sqrt();
                         rshift = r2;
-                        vshift = [- v2 * theta2.sin(), v2 * theta2.cos()];
+                        vshift = Vec3::new(- v2 * theta2.sin(), v2 * theta2.cos(), 0.)
                     }
-                    DiskCenter::Arbitrary { x, y } => {
-                        rshift = [x, y];
-                        vshift = [0.0, 0.0];
+                    DiskCenter::Arbitrary { x, y , z} => {
+                        rshift = Vec3{ x:x , y:y, z:z };
+                        vshift = Vec3::default();
                         mshift = mass;
                     }
                 }
                     }
                     CentralObject::Single { mass } => {
-                        rshift = [0.0, 0.0];
-                        vshift = [0.0, 0.0];
+                        rshift = Vec3::default();
+                        vshift = Vec3::default();
                         mshift = mass;
                     }
                 }
@@ -426,14 +503,17 @@ impl Solver for Dust {
                 for i in 0..n {
                     let theta = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
                     let r = 0.1;
-                    let px = r * theta.cos() + rshift[0];
-                    let py = r * theta.sin() + rshift[1];
+                    let px = r * theta.cos() + rshift.x;
+                    let py = r * theta.sin() + rshift.y;
+                    let pz = r * theta.sin() + rshift.z;
                     // Circular orbital velocity: v = sqrt(GM/r)
                     let v = (mshift / r).sqrt();
                     x.push(px);
                     y.push(py);
-                    vx.push(-v * theta.sin() + vshift[0]);
-                    vy.push(v * theta.cos() + vshift[1]);
+                    z.push(pz);
+                    vx.push(-v * theta.sin() + vshift.x);
+                    vy.push(v * theta.cos() + vshift.y);
+                    vz.push(v * theta.cos() + vshift.z);
                 }
             }
             DustSetup::RandomDisk => {
@@ -442,13 +522,16 @@ impl Solver for Dust {
                 for i in 0..n {
                     let r = 0.3 + 0.7 * (i as f64 / n as f64).sqrt();
                     let theta = 2.0 * std::f64::consts::PI * (i as f64 * phi);
-                    let px = r * theta.cos() + rshift[0];
-                    let py = r * theta.sin() + rshift[1];
+                    let px = r * theta.cos() + rshift.x;
+                    let py = r * theta.sin() + rshift.y;
+                    let pz = r * theta.sin() + rshift.z;
                     let v = (mshift / r).sqrt();
                     x.push(px);
                     y.push(py);
-                    vx.push(-v * theta.sin() + vshift[0]);
-                    vy.push(v * theta.cos() + vshift[1]);
+                    z.push(pz);
+                    vx.push(-v * theta.sin() + vshift.x);
+                    vy.push(v * theta.cos() + vshift.y);
+                    vz.push(v * theta.cos() + vshift.z);
                 }
             }
         }
@@ -457,8 +540,10 @@ impl Solver for Dust {
             time: self.physics.tstart,
             x,
             y,
+            z,
             vx,
             vy,
+            vz,
         }
     }
 
@@ -586,13 +671,13 @@ impl DustApp {
             if let Some(params) = self.binary_params.clone() {
                 let (r1, r2) = orbital_state(params, time);
                 star_series.push(
-                    Series::scatter(vec![r1[0]], vec![r1[1]])
+                    Series::scatter(vec![r1.x], vec![r1.y])
                         .label("primary")
                         .marker_radius(6.0)
                         .color(rgb_tuple(255, 220, 120))
                 );
                 star_series.push(
-                    Series::scatter(vec![r2[0]], vec![r2[1]])
+                    Series::scatter(vec![r2.x], vec![r2.y])
                         .label("secondary")
                         .marker_radius(5.0)
                         .color(rgb_tuple(255, 149, 120))
@@ -686,12 +771,13 @@ impl DustApp {
             // Full config JSON — update the form unless it was the source
             DriverEvent::Config(value) => {
                 if let Ok(config) = serde_json::from_value::<SimulationConfig<Dust>>(value.clone()) {
-                    if let CentralObject::Binary { mass, q, a, e } = config.physics.central_object {
+                    if let CentralObject::Binary { mass, q, a, e , i} = config.physics.central_object {
                         self.binary_params = Some(AnomalyParams {
                             mass,
                             q,
                             a,
                             e,
+                            i, 
                             mean_anom: 0.0,
                         });
                     } else {
