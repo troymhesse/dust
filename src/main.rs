@@ -1,7 +1,7 @@
 //! Particle simulation with GPUI visualization.
 
 use std::f64::consts::PI;
-use std::ops::{Add, Sub, Mul};
+use std::ops::{Add, Sub, Mul, AddAssign};
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -90,6 +90,15 @@ impl Add for Vec3 {
         }
     }
 }
+impl AddAssign for Vec3 {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+            z: self.z + rhs.z,
+        };
+    }
+}
 impl Sub for Vec3 {
     type Output = Self;
     fn sub(self, vec: Vec3) -> Self {
@@ -110,6 +119,16 @@ impl Mul<f64> for Vec3 {
         }
     }
 }
+impl Mul<Vec3> for f64 {
+    type Output = Vec3;
+    fn mul(self, vec: Vec3) -> Vec3 {
+        Vec3 {
+            x: self * vec.x, 
+            y: self * vec.y, 
+            z: self * vec.z, 
+        }
+    }
+}
 
 impl Vec3 {
     fn new(x: f64, y: f64, z: f64) -> Self {
@@ -119,7 +138,7 @@ impl Vec3 {
         self.x * vec.x + self.y * vec.y + self.z * vec.z
     }
     fn mag(&self) -> f64 {
-        self.dot(*self)
+        (self.dot(*self)).sqrt()
     }
 }
 
@@ -234,18 +253,15 @@ impl Validate for DustCompute {}
 #[derive(Serialize, Deserialize)]
 struct State {
     time: f64,
-    x: Vec<f64>,
-    y: Vec<f64>,
-    z: Vec<f64>,
-    vx: Vec<f64>,
-    vy: Vec<f64>,
-    vz: Vec<f64>,
+    positions: Vec<Vec3>,
+    velocities: Vec<Vec3>,
 }
 
 #[derive(Serialize)]
 struct DustProducts {
     x: Vec<f64>,
     y: Vec<f64>,
+    z: Vec<f64>,
 }
 
 impl PlotData for DustProducts {
@@ -285,10 +301,6 @@ impl NodeFilter for DustFilter {
 // Solver
 // ============================================================================
 
-fn magnitude(v: [f64; 2]) -> f64 {
-    (v[0] * v[0] + v[1] * v[1]).sqrt()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct AnomalyParams {
@@ -316,7 +328,7 @@ impl Default for AnomalyParams {
 impl AnomalyParams {
     /// Magnitude of eccentricity vector
     fn e_mag(&self) -> f64 {
-        self.e.x * self.e.x + self.e.y * self.e.y
+        (self.e.x * self.e.x + self.e.y * self.e.y).sqrt()
     }
     /// Mean angular motion of object (angular frequency)
     fn mean_angular_motion(&self) -> f64 {
@@ -398,14 +410,13 @@ struct Dust {
 
 impl Dust {
     /// Compute gravitational acceleration. 
-    fn acceleration(&self, x: f64, y: f64, state: &State) -> (f64, f64) {
+    fn acceleration(&self, r: Vec3, state: &State) -> Vec3 {
         match self.physics.central_object {
             CentralObject::Single { mass } => {
                 let eps = self.physics.softening;
-                let r2 = x * x + y * y + eps * eps;
-                let r = r2.sqrt();
-                let acc = -mass / (r * r2);
-                (acc * x, acc * y) 
+                let r2 = r.dot(r) + eps * eps;
+                let acc = -mass / (r2.sqrt() * r2);
+                acc * r
             }
             CentralObject::Binary { mass, q, a, e, i } => {
                 let p = AnomalyParams{ 
@@ -421,17 +432,17 @@ impl Dust {
                 let m2 = p.q * m1;
                 let time_since_periapse = state.time;
                 let (r1, r2) = orbital_state(p, time_since_periapse);
-                let r1_mag = magnitude([x - r1.x, y - r1.y]);
-                let r2_mag = magnitude([x - r2.x, y - r2.y]);
-                let r1_sq = r1_mag * r1_mag + eps * eps;
-                let r2_sq = r2_mag * r2_mag + eps * eps;
+                let r1_sep = r - r1;
+                let r2_sep = r - r2;
+                let r1_sq = r1_sep.dot(r1_sep) + eps * eps;
+                let r2_sq = r2_sep.dot(r2_sep) + eps * eps;
 
                 let acc1 = - m1 / r1_sq / r1_sq.sqrt();
                 let acc2 = - m2 / r2_sq / r2_sq.sqrt();
-                let a1 = (acc1 * (x - r1.x), acc1 * (y - r1.y));
-                let a2 = (acc2 * (x - r2.x), acc2 * (y - r2.y));
+                let a1 = acc1 * r1_sep;
+                let a2 = acc2 * r2_sep;
 
-                (a1.0 + a2.0, a1.1 + a2.1)
+                a1 + a2
             }
         }
     }
@@ -452,12 +463,8 @@ impl Solver for Dust {
 
     fn initial(&self) -> State {
         let n = self.initial.num_particles;
-        let mut x = Vec::with_capacity(n);
-        let mut y = Vec::with_capacity(n);
-        let mut z: Vec<f64> = Vec::with_capacity(n);
-        let mut vx = Vec::with_capacity(n);
-        let mut vy = Vec::with_capacity(n);
-        let mut vz: Vec<f64> = Vec::with_capacity(n);
+        let mut rs: Vec<Vec3> = Vec::with_capacity(n);
+        let mut vs: Vec<Vec3> = Vec::with_capacity(n);
         
         let r1: Vec3;
         let r2: Vec3;
@@ -474,13 +481,13 @@ impl Solver for Dust {
                 match self.initial.disk_center {
                     DiskCenter::Primary => {
                         mshift = mass / (1. + q);
-                        let v1 = (mshift * q / r12.mag()).sqrt();
+                        let v1 = (mshift * mshift * q * q / mass / r12.mag()).sqrt();
                         rshift = r1;
                         vshift = Vec3::new(- v1 * theta1.sin(), v1 * theta1.cos(),0.);
                     }
                     DiskCenter::Secondary => {
                         mshift = mass * q / (1. + q);
-                        let v2 = (mshift / q / r12.mag()).sqrt();
+                        let v2 = (mshift * mshift / q / q / mass / r12.mag()).sqrt();
                         rshift = r2;
                         vshift = Vec3::new(- v2 * theta2.sin(), v2 * theta2.cos(), 0.)
                     }
@@ -490,30 +497,29 @@ impl Solver for Dust {
                         mshift = mass;
                     }
                 }
-                    }
-                    CentralObject::Single { mass } => {
-                        rshift = Vec3::default();
-                        vshift = Vec3::default();
-                        mshift = mass;
-                    }
-                }
+            }
+            CentralObject::Single { mass } => {
+                rshift = Vec3::default();
+                vshift = Vec3::default();
+                mshift = mass;
+            }
+        }
         
         match self.initial.setup {
             DustSetup::Ring => {
                 for i in 0..n {
                     let theta = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
                     let r = 0.1;
-                    let px = r * theta.cos() + rshift.x;
-                    let py = r * theta.sin() + rshift.y;
-                    let pz = r * theta.sin() + rshift.z;
+                    let px = r * theta.cos();
+                    let py = r * theta.sin();
+                    let pz = 0.0;
+                    rs.push(Vec3::new(px, py, pz) + rshift);
                     // Circular orbital velocity: v = sqrt(GM/r)
                     let v = (mshift / r).sqrt();
-                    x.push(px);
-                    y.push(py);
-                    z.push(pz);
-                    vx.push(-v * theta.sin() + vshift.x);
-                    vy.push(v * theta.cos() + vshift.y);
-                    vz.push(v * theta.cos() + vshift.z);
+                    let velx = -v * theta.sin();
+                    let vely = v * theta.cos();
+                    let velz = 0.0;
+                    vs.push(Vec3::new(velx, vely, velz) + vshift);
                 }
             }
             DustSetup::RandomDisk => {
@@ -522,28 +528,24 @@ impl Solver for Dust {
                 for i in 0..n {
                     let r = 0.3 + 0.7 * (i as f64 / n as f64).sqrt();
                     let theta = 2.0 * std::f64::consts::PI * (i as f64 * phi);
-                    let px = r * theta.cos() + rshift.x;
-                    let py = r * theta.sin() + rshift.y;
-                    let pz = r * theta.sin() + rshift.z;
+                    let px = r * theta.cos();
+                    let py = r * theta.sin();
+                    let pz = 0.0;
+                    rs.push(Vec3::new(px, py, pz) + rshift);
+                    // Circular orbital velocity: v = sqrt(GM/r)
                     let v = (mshift / r).sqrt();
-                    x.push(px);
-                    y.push(py);
-                    z.push(pz);
-                    vx.push(-v * theta.sin() + vshift.x);
-                    vy.push(v * theta.cos() + vshift.y);
-                    vz.push(v * theta.cos() + vshift.z);
+                    let velx = -v * theta.sin();
+                    let vely = v * theta.cos();
+                    let velz = 0.0;
+                    vs.push(Vec3::new(velx, vely, velz) + vshift);
                 }
             }
         }
 
         State {
             time: self.physics.tstart,
-            x,
-            y,
-            z,
-            vx,
-            vy,
-            vz,
+            positions: rs,
+            velocities: vs,
         }
     }
 
@@ -560,22 +562,19 @@ impl Solver for Dust {
     }
 
     fn advance(&self, mut state: State, dt: f64) -> State {
-        let n = state.x.len();
+        let n = state.positions.len();
 
         // Leapfrog (kick-drift-kick)
         for i in 0..n {
-            let (ax, ay) = self.acceleration(state.x[i], state.y[i], &state);
-            state.vx[i] += 0.5 * dt * ax;
-            state.vy[i] += 0.5 * dt * ay;
+            let a = self.acceleration(state.positions[i], &state);
+            state.velocities[i] += 0.5 * dt * a;
         }
         for i in 0..n {
-            state.x[i] += dt * state.vx[i];
-            state.y[i] += dt * state.vy[i];
+            state.positions[i] += dt * state.velocities[i];
         }
         for i in 0..n {
-            let (ax, ay) = self.acceleration(state.x[i], state.y[i], &state);
-            state.vx[i] += 0.5 * dt * ax;
-            state.vy[i] += 0.5 * dt * ay;
+            let a = self.acceleration(state.positions[i], &state);
+            state.velocities[i] += 0.5 * dt * a;
         }
 
         state.time += dt;
@@ -584,15 +583,16 @@ impl Solver for Dust {
 
     fn products(&self, state: &State) -> DustProducts {
         DustProducts {
-            x: state.x.clone(),
-            y: state.y.clone(),
+            x: state.positions.iter().map(|v| v.x).collect(),
+            y: state.positions.iter().map(|v| v.y).collect(),
+            z: state.positions.iter().map(|v| v.z).collect(),
         }
     }
 
     fn status(&self, state: &State) -> DustStatus {
         DustStatus {
             time: state.time,
-            num_particles: state.x.len(),
+            num_particles: state.positions.len(),
         }
     }
 
