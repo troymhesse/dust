@@ -1,0 +1,35 @@
+SimulationConfig(
+    driver: DriverConfig(
+        checkpoint_interval: None,
+        output_dir: ".",
+    ),
+    physics: DustPhysics(
+        tstart: 0.0,
+        tfinal: 10.0,
+        dt: 0.001,
+        softening: 0.01,
+        central_object: Binary(
+            mass: 1.0,
+            q: 0.1,
+            a: 0.5,
+            e: Vec2(
+                x: 0.0,
+                y: 0.0,
+            ),
+            i: 0.0,
+        ),
+    ),
+    initial: DustInitial(
+        num_particles: 1000,
+        disk_center: Arbitrary(
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        ),
+        setup: RandomDisk(
+            inner_radius: 1.0,
+            outer_radius: 2.0,
+        ),
+    ),
+    compute: DustCompute(),
+)

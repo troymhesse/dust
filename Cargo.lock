@@ -1613,6 +1613,7 @@ dependencies = [
  "gpui-plot",
  "gpui-schema",
  "libm",
+ "rand 0.8.5",
  "ron",
  "schemars",
  "serde",

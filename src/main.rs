@@ -2,6 +2,7 @@
 
 use std::f64::consts::PI;
 use std::ops::{Add, Sub, Mul, AddAssign};
+use rand::Rng;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -212,7 +213,7 @@ impl Default for DustInitial {
         Self {
             num_particles: 1000,
             disk_center: DiskCenter::Arbitrary { x: 0.0, y: 0.0, z: 0.0 }, 
-            setup: DustSetup::Ring,
+            setup: DustSetup::RandomDisk { inner_radius: 1.0, outer_radius: 2.0 }
         }
     }
 }
@@ -222,9 +223,11 @@ impl Validate for DustInitial {}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 enum DustSetup {
     /// Particles on a circular ring
-    Ring,
+    Ring {radius: f64},
     /// Particles in a randomized disk
-    RandomDisk,
+    RandomDisk {inner_radius: f64, outer_radius: f64},
+    /// Particles in a uniform disk
+    UniformDisk {inner_radius: f64, outer_radius: f64}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -506,38 +509,58 @@ impl Solver for Dust {
         }
         
         match self.initial.setup {
-            DustSetup::Ring => {
+            DustSetup::Ring { radius } => {
                 for i in 0..n {
-                    let theta = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
-                    let r = 0.1;
+                    let theta = 2.0 * PI * i as f64 / n as f64;
+                    let r = radius;
                     let px = r * theta.cos();
                     let py = r * theta.sin();
                     let pz = 0.0;
                     rs.push(Vec3::new(px, py, pz) + rshift);
                     // Circular orbital velocity: v = sqrt(GM/r)
                     let v = (mshift / r).sqrt();
-                    let velx = -v * theta.sin();
-                    let vely = v * theta.cos();
-                    let velz = 0.0;
-                    vs.push(Vec3::new(velx, vely, velz) + vshift);
+                    let vx = -v * theta.sin();
+                    let vy = v * theta.cos();
+                    let vz = 0.0;
+                    vs.push(Vec3::new(vx, vy, vz) + vshift);
                 }
             }
-            DustSetup::RandomDisk => {
-                // Simple deterministic pseudo-random using golden ratio
-                let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
-                for i in 0..n {
-                    let r = 0.3 + 0.7 * (i as f64 / n as f64).sqrt();
-                    let theta = 2.0 * std::f64::consts::PI * (i as f64 * phi);
+            DustSetup::RandomDisk{ inner_radius, outer_radius} => {
+                //  Really random disk
+                let h = 0.; // Constant 'aspect ratio' of disk
+                let mut rng = rand::thread_rng();
+                for _i in 0..n {
+                    let r: f64 = (rng.gen_range(inner_radius*inner_radius .. outer_radius*outer_radius)).sqrt();
+                    let theta = rng.gen_range(0. .. 2.*PI);
                     let px = r * theta.cos();
                     let py = r * theta.sin();
-                    let pz = 0.0;
+                    let pz = h * r;
                     rs.push(Vec3::new(px, py, pz) + rshift);
                     // Circular orbital velocity: v = sqrt(GM/r)
                     let v = (mshift / r).sqrt();
-                    let velx = -v * theta.sin();
-                    let vely = v * theta.cos();
-                    let velz = 0.0;
-                    vs.push(Vec3::new(velx, vely, velz) + vshift);
+                    let vx = -v * theta.sin();
+                    let vy = v * theta.cos();
+                    let vz = 0.0;
+                    vs.push(Vec3::new(vx, vy, vz) + vshift);
+                }
+            }
+            DustSetup::UniformDisk{ inner_radius, outer_radius } => {
+                // Simple deterministic pseudo-random using golden ratio
+                let h = 0.; // Constant 'aspect ratio' of disk
+                let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+                for i in 0..n {
+                    let r = inner_radius + (outer_radius - inner_radius) * (i as f64 / n as f64).sqrt();
+                    let theta = 2.0 * PI * (i as f64 * phi);
+                    let px = r * theta.cos();
+                    let py = r * theta.sin();
+                    let pz = h * r;
+                    rs.push(Vec3::new(px, py, pz) + rshift);
+                    // Circular orbital velocity: v = sqrt(GM/r)
+                    let v = (mshift / r).sqrt();
+                    let vx = -v * theta.sin();
+                    let vy = v * theta.cos();
+                    let vz = 0.0;
+                    vs.push(Vec3::new(vx, vy, vz) + vshift);
                 }
             }
         }
