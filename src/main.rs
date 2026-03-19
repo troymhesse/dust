@@ -1,7 +1,10 @@
 //! Particle simulation with GPUI visualization.
 
+use core::str;
 use std::f64::consts::PI;
-use std::ops::{Add, Sub, Mul, AddAssign};
+use std::ops::{Add, Sub, Mul, Div, AddAssign};
+use std::os::macos::raw::stat;
+use gpui_component::label;
 use rand::Rng;
 
 use std::cell::Cell;
@@ -68,6 +71,12 @@ impl Default for Vec2 {
     }
 }
 
+impl Vec2{
+    fn mag(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 struct Vec3 {
     x: f64, 
@@ -130,16 +139,35 @@ impl Mul<Vec3> for f64 {
         }
     }
 }
+impl Div<f64> for Vec3 {
+    type Output = Self;
+    fn div(self, c: f64) -> Self {
+        Vec3 {
+            x: self.x / c,
+            y: self.y / c,
+            z: self.z / c,
+        }
+    }
+}
 
 impl Vec3 {
     fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x: x, y: y, z: z}
+    }
+    fn xhat() -> Self {
+        Self {x: 1., y: 0., z: 0.}
+    }
+    fn yhat() -> Self {
+        Self {x: 0., y: 1., z: 0.}
     }
     fn dot(&self, vec: Vec3) -> f64 {
         self.x * vec.x + self.y * vec.y + self.z * vec.z
     }
     fn mag(&self) -> f64 {
         (self.dot(*self)).sqrt()
+    }
+    fn normalize(&self) -> Self {
+        *self * (1. /  self.mag())
     }
 }
 
@@ -152,18 +180,21 @@ impl Vec3 {
 enum CentralObject {
     Single{ mass: f64 },
     Binary{ mass: f64, q: f64, a: f64, e: Vec2, i: f64 },
+    Triple{ params: TripleParams }
 }
 
-
 impl Default for CentralObject {
+    // fn default() -> Self {
+    //     Self::Binary {
+    //         mass: 1.0, 
+    //         q: 0.1, 
+    //         a: 0.5, 
+    //         e: Vec2::default(), 
+    //         i: 0.0,
+    //     }
+    // }
     fn default() -> Self {
-        Self::Binary {
-            mass: 1.0, 
-            q: 0.1, 
-            a: 0.5, 
-            e: Vec2::default(), 
-            i: 0.0,
-        }
+        Self::Triple { params: TripleParams::default() }
     }
 }
 
@@ -253,11 +284,13 @@ impl Validate for DustCompute {}
 // State and Products
 // ============================================================================
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct State {
     time: f64,
     positions: Vec<Vec3>,
     velocities: Vec<Vec3>,
+    mass_positions: Vec<Vec3>,
+    mass_velocities: Vec<Vec3>,
 }
 
 #[derive(Serialize)]
@@ -265,6 +298,7 @@ struct DustProducts {
     x: Vec<f64>,
     y: Vec<f64>,
     z: Vec<f64>,
+    points: Vec<[f64; 2]>,
 }
 
 impl PlotData for DustProducts {
@@ -272,6 +306,12 @@ impl PlotData for DustProducts {
         let mut map = HashMap::new();
         map.insert("x".into(), self.x.clone());
         map.insert("y".into(), self.y.clone());
+
+        // Add mass positions
+        let mass_x: Vec<f64> = self.points.iter().map(|p| p[0]).collect();
+        let mass_y: Vec<f64> = self.points.iter().map(|p| p[1]).collect();
+        map.insert("mass_x".into(), mass_x);
+        map.insert("mass_y".into(), mass_y);
         map
     }
 }
@@ -303,6 +343,33 @@ impl NodeFilter for DustFilter {
 // ============================================================================
 // Solver
 // ============================================================================
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+struct TripleParams {
+     mass: f64,
+     q1: f64,
+     a1: f64,
+     e1: Vec2,
+     q2: f64,
+     a2: f64,
+     e2: Vec2,
+     i: f64,
+}
+
+impl Default for TripleParams {
+    fn default() -> Self {
+        Self {
+            mass: 1.0,
+            q1: 1.0,
+            a1: 0.01,
+            e1: Vec2::default(),
+            q2: 1.0,
+            a2: 20.0,
+            e2: Vec2::default(),
+            i: 0.0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -389,7 +456,7 @@ fn orbital_state(mut p: AnomalyParams, time_since_periapse: f64) -> (Vec3, Vec3)
     let y_rot_i = y;
     let z_rot_i = x * p.i.sin() + z * p.i.cos();
     // Rotate orbit based on eccentricity vector with argument of periapsis (ω)
-    let arg_of_peri = libm::atan2(p.e.y, p.e.x);
+    let arg_of_peri = atan2(p.e.y, p.e.x);
     let x_rot_w = x_rot_i * arg_of_peri.cos() - y_rot_i * arg_of_peri.sin();
     let y_rot_w = x_rot_i * arg_of_peri.sin() + y_rot_i * arg_of_peri.cos();
     let z_rot_w = z_rot_i;
@@ -402,7 +469,7 @@ fn orbital_state(mut p: AnomalyParams, time_since_periapse: f64) -> (Vec3, Vec3)
     let y1 = - y2 * p.q;
     let z1 = - z2 * p.q;
 
-    (Vec3{ x: x1, y: y1, z: z1} , Vec3{ x: x2, y: y2, z: z2 })
+    (Vec3::new(x1, y1, z1) , Vec3::new(x2, y2, z2))
 }
 
 
@@ -447,6 +514,24 @@ impl Dust {
 
                 a1 + a2
             }
+            CentralObject::Triple { params } => {
+                let mn = state.mass_positions.len();
+                let eps = self.physics.softening;
+                let m1 = params.mass / (1. + params.q1) / (1. + params.q2);
+                let m2 = m1 * params.q1;
+                let m3 = (m1 + m2) * params.q2;
+                let masses = [m1, m2, m3];
+                let mut acc = Vec3::default();
+                for i in 0..mn {
+                    let r_sep = r - state.mass_positions[i];
+                    if r_sep.mag() == 0. {
+                        continue
+                    }
+                    let r2 = r_sep.dot(r_sep) + eps * eps;
+                    acc += - masses[i] / (r2 * r2.sqrt()) * r_sep;
+                }
+                acc
+            }
         }
     }
 }
@@ -469,15 +554,15 @@ impl Solver for Dust {
         let mut rs: Vec<Vec3> = Vec::with_capacity(n);
         let mut vs: Vec<Vec3> = Vec::with_capacity(n);
         
-        let r1: Vec3;
-        let r2: Vec3;
+        let mut mass_positions: Vec<Vec3> = vec![];
+        let mut mass_velocities: Vec<Vec3> = vec![];
         let rshift: Vec3;
         let vshift: Vec3;
         let mshift: f64;
         match self.physics.central_object {
             CentralObject::Binary { mass, q, a, e, i } => {
                 let p = AnomalyParams { mass: mass, q: q, a: a, e: e, mean_anom: 0.0, i: i };
-                (r1, r2) = orbital_state(p, self.physics.tstart);
+                let (r1, r2) = orbital_state(p, self.physics.tstart);
                 let r12 = r2 - r1;
                 let theta1 = atan2(r1.y, r1.x);
                 let theta2 = atan2(r2.y, r2.x);
@@ -500,14 +585,35 @@ impl Solver for Dust {
                         mshift = mass;
                     }
                 }
+                mass_positions.push(r1); mass_positions.push(r2);
+                mass_velocities.push(Vec3::default()); mass_velocities.push(Vec3::default());
             }
             CentralObject::Single { mass } => {
+                mass_positions.push(Vec3::default());
+                mass_velocities.push(Vec3::default());
                 rshift = Vec3::default();
                 vshift = Vec3::default();
                 mshift = mass;
             }
+            CentralObject::Triple { params } => {
+                let m1 = params.mass / (1. + params.q1) / (1. + params.q2);
+                let m2 = m1 * params.q1;
+
+                let r1 = params.a1 * (1. - params.e1.mag()) * params.q1 / (1. + params.q1) * Vec3::xhat();
+                let r2 = -1. * r1 / params.q1;
+                let r3 = params.a2 * (1. - params.e2.mag()) / (1. + params.q2) * Vec3::xhat();
+
+                let v1 = (m2 * m2 / params.mass / (r2 - r1).mag()).sqrt() * Vec3::yhat();
+                let v2 = - (m1 * m1 / params.mass / (r2 - r1).mag()).sqrt() * Vec3::yhat();
+                let v3 = ((m1 + m2) * (m1 + m2) / params.mass / r3.mag()).sqrt() * Vec3::yhat();
+                mass_positions.push(r1); mass_positions.push(r2); mass_positions.push(r3);
+                mass_velocities.push(v1); mass_velocities.push(v2); mass_velocities.push(v3);
+                rshift = Vec3::default();
+                vshift = Vec3::default();
+                mshift = params.mass / (1. + params.q2);
+            }
         }
-        
+
         match self.initial.setup {
             DustSetup::Ring { radius } => {
                 for i in 0..n {
@@ -569,6 +675,8 @@ impl Solver for Dust {
             time: self.physics.tstart,
             positions: rs,
             velocities: vs,
+            mass_positions: mass_positions,
+            mass_velocities: mass_velocities,
         }
     }
 
@@ -585,9 +693,43 @@ impl Solver for Dust {
     }
 
     fn advance(&self, mut state: State, dt: f64) -> State {
-        let n = state.positions.len();
-
         // Leapfrog (kick-drift-kick)
+        let n = state.positions.len();
+        let mn = state.mass_positions.len();
+
+        // Update massive body positions
+        match self.physics.central_object {
+            CentralObject::Single { mass: _ } => {
+                state.mass_positions[0] = Vec3::default();
+            }
+            CentralObject::Binary { mass, q, a, e, i } => {
+                let p = AnomalyParams{ 
+                    mass: mass, 
+                    q: q, 
+                    a: a, 
+                    e: e, 
+                    i: i,
+                    mean_anom: 0.0, 
+                };
+                let time_since_periapse = state.time;
+                (state.mass_positions[0], state.mass_positions[1]) = orbital_state(p, time_since_periapse);
+            }
+            _ => {
+                for i in 0..mn {
+                    let a = self.acceleration(state.mass_positions[i], &state);
+                    state.mass_velocities[i] += 0.5 * dt * a;
+                }
+                for i in 0..mn {
+                    state.mass_positions[i] += dt * state.mass_velocities[i];
+                }
+                for i in 0..mn {
+                    let a = self.acceleration(state.mass_positions[i], &state);
+                    state.mass_velocities[i] += 0.5 * dt * a;
+                }
+            }
+        }
+        
+        // Update particle positions
         for i in 0..n {
             let a = self.acceleration(state.positions[i], &state);
             state.velocities[i] += 0.5 * dt * a;
@@ -609,6 +751,7 @@ impl Solver for Dust {
             x: state.positions.iter().map(|v| v.x).collect(),
             y: state.positions.iter().map(|v| v.y).collect(),
             z: state.positions.iter().map(|v| v.z).collect(),
+            points: state.mass_positions.iter().map(|r| [r.x, r.y]).collect(),
         }
     }
 
@@ -688,23 +831,39 @@ impl DustApp {
         // App-specific: update plot data (preserves pan/zoom view state)
         if diff.iteration_advanced || diff.state_changed {
             let snap = self.snapshot_reader.snapshot();
-            let time = snap.time;
+            let mass_x = snap.linear.get("mass_x");
+            let mass_y = snap.linear.get("mass_y");
             let style = PlotStyle::from_theme(cx.theme());
             let mut star_series = Vec::new();
-            if let Some(params) = self.binary_params.clone() {
-                let (r1, r2) = orbital_state(params, time);
-                star_series.push(
-                    Series::scatter(vec![r1.x], vec![r1.y])
-                        .label("primary")
-                        .marker_radius(6.0)
-                        .color(rgb_tuple(255, 220, 120))
-                );
-                star_series.push(
-                    Series::scatter(vec![r2.x], vec![r2.y])
-                        .label("secondary")
-                        .marker_radius(5.0)
-                        .color(rgb_tuple(255, 149, 120))
-                );
+
+            if let (Some(mx), Some(my)) = (mass_x, mass_y) {
+                for i in 0..mx.len() {
+                    let color = match i {
+                        0 => rgb_tuple(255, 220, 120),
+                        1 => rgb_tuple(255, 150, 120),
+                        2 => rgb_tuple(120, 200, 255),
+                        _ => rgb_tuple(200, 200, 200),
+                    };
+                    let marker_size = match i {
+                        0 => 6.0, 
+                        1 => 5.0, 
+                        2 => 3.5, 
+                        _ => 2.5, 
+                    };
+                    let star_label = match i {
+                        0 => String::from("primary"),
+                        1 => String::from("secondary"),
+                        2 => String::from("tertiary"),
+                        _ => format!("body {i}"),
+                    };
+
+                    star_series.push(
+                        Series::scatter(vec![mx[i]], vec![my[i]])
+                            .label(star_label)
+                            .marker_radius(marker_size)
+                            .color(color)
+                    );
+                }
             }
             let first_data = diff.state_changed && snap.has_state;
             if let (Some(x), Some(y)) = (snap.linear.get("x"), snap.linear.get("y")) {
