@@ -4,7 +4,7 @@ use core::str;
 use std::f64::consts::PI;
 use std::ops::{Add, Sub, Mul, Div, AddAssign};
 use std::os::macos::raw::stat;
-use gpui_component::label;
+// use gpui_component::label;
 use rand::Rng;
 
 use std::cell::Cell;
@@ -178,8 +178,8 @@ impl Vec3 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 enum CentralObject {
-    Single{ mass: f64 },
-    Binary{ mass: f64, q: f64, a: f64, e: Vec2, i: f64 },
+    Single{ params: SingleParams },
+    Binary{ params: BinaryParams },
     Triple{ params: TripleParams }
 }
 
@@ -268,6 +268,34 @@ enum DiskCenter {
     Arbitrary{ x: f64, y: f64, z: f64 }, 
 }
 
+// impl DiskCenter {
+//     fn shifted_disk_center(&self, dust: Dust, obj: CentralObject) -> (f64, Vec3, Vec3) {
+//         let mshift: f64;
+//         let rshift: Vec3;
+//         let vshift: Vec3;
+//         match dust.initial.disk_center {
+//             DiskCenter::Primary => {
+//                 mshift = dust.physics.central_object.mass / (1. + q);
+//                 let v1 = (mshift * mshift * q * q / obj.mass / r12.mag()).sqrt();
+//                 rshift = r1;
+//                 vshift = Vec3::new(- v1 * theta1.sin(), v1 * theta1.cos(),0.);
+//             }
+//             DiskCenter::Secondary => {
+//                 mshift = mass * q / (1. + q);
+//                 let v2 = (mshift * mshift / q / q / mass / r12.mag()).sqrt();
+//                 rshift = r2;
+//                 vshift = Vec3::new(- v2 * theta2.sin(), v2 * theta2.cos(), 0.)
+//             }
+//             DiskCenter::Arbitrary { x, y , z} => {
+//                 rshift = Vec3{ x:x , y:y, z:z };
+//                 vshift = Vec3::default();
+//                 mshift = mass;
+//             }
+//         }
+//         (mshift, rshift, vshift)
+//     }
+// }
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct DustCompute {}
@@ -343,8 +371,42 @@ impl NodeFilter for DustFilter {
 // ============================================================================
 // Solver
 // ============================================================================
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct SingleParams {
+     mass: f64,
+}
+impl Default for SingleParams {
+    fn default() -> Self {
+     Self {
+        mass: 1.0,
+     }   
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct BinaryParams {
+     mass: f64,
+     q: f64,
+     a: f64,
+     e: Vec2,
+     i: f64,
+}
+impl Default for BinaryParams {
+    fn default() -> Self {
+     Self {
+        mass: 1.0,
+        q: 1.0,
+        a: 0.5,
+        e: Vec2::default(),
+        i: 0.0,
+     }   
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
 struct TripleParams {
      mass: f64,
      q1: f64,
@@ -361,10 +423,10 @@ impl Default for TripleParams {
         Self {
             mass: 1.0,
             q1: 1.0,
-            a1: 0.01,
+            a1: 0.5,
             e1: Vec2::default(),
-            q2: 1.0,
-            a2: 20.0,
+            q2: 0.001,
+            a2: 10.0,
             e2: Vec2::default(),
             i: 0.0,
         }
@@ -374,22 +436,14 @@ impl Default for TripleParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct AnomalyParams {
-    mass: f64, 
-    q: f64, 
-    a: f64, 
-    e: Vec2, 
-    i: f64,
+    params: BinaryParams,
     mean_anom: f64, 
 }
 
 impl Default for AnomalyParams {
     fn default() -> Self {
         Self {
-            mass: 1.0, 
-            q: 0.1, 
-            a: 1.0, 
-            e: Vec2{ x: 0.0, y: 0.0 }, 
-            i: 0.0,
+            params: BinaryParams::default(),
             mean_anom: 0.0, 
         }
     }
@@ -398,11 +452,11 @@ impl Default for AnomalyParams {
 impl AnomalyParams {
     /// Magnitude of eccentricity vector
     fn e_mag(&self) -> f64 {
-        (self.e.x * self.e.x + self.e.y * self.e.y).sqrt()
+        (self.params.e.x * self.params.e.x + self.params.e.y * self.params.e.y).sqrt()
     }
     /// Mean angular motion of object (angular frequency)
     fn mean_angular_motion(&self) -> f64 {
-        (self.mass / self.a / self.a / self.a).sqrt()
+        (self.params.mass / self.params.a / self.params.a / self.params.a).sqrt()
     }
     /// Period of object motion
     fn period(&self) -> f64 {
@@ -448,26 +502,26 @@ where
 fn orbital_state(mut p: AnomalyParams, time_since_periapse: f64) -> (Vec3, Vec3) {
     let e_mag = p.e_mag();
     let ecc_anom = p.eccentric_anomaly(time_since_periapse);
-    let x = p.a * (ecc_anom.cos() - e_mag);
-    let y = p.a * (1. - e_mag * e_mag).sqrt() * ecc_anom.sin();
+    let x = p.params.a * (ecc_anom.cos() - e_mag);
+    let y = p.params.a * (1. - e_mag * e_mag).sqrt() * ecc_anom.sin();
     let z = 0.0;
     // Rotate orbit based on inclination (i) wrt disk plane
-    let x_rot_i = x * p.i.cos() - z * p.i.sin();
+    let x_rot_i = x * p.params.i.cos() - z * p.params.i.sin();
     let y_rot_i = y;
-    let z_rot_i = x * p.i.sin() + z * p.i.cos();
+    let z_rot_i = x * p.params.i.sin() + z * p.params.i.cos();
     // Rotate orbit based on eccentricity vector with argument of periapsis (ω)
-    let arg_of_peri = atan2(p.e.y, p.e.x);
+    let arg_of_peri = atan2(p.params.e.y, p.params.e.x);
     let x_rot_w = x_rot_i * arg_of_peri.cos() - y_rot_i * arg_of_peri.sin();
     let y_rot_w = x_rot_i * arg_of_peri.sin() + y_rot_i * arg_of_peri.cos();
     let z_rot_w = z_rot_i;
     // Secondary position
-    let x2 = - x_rot_w / (1. + p.q);
-    let y2 = - y_rot_w / (1. + p.q);
-    let z2 = z_rot_w / (1. + p.q);
+    let x2 = - x_rot_w / (1. + p.params.q);
+    let y2 = - y_rot_w / (1. + p.params.q);
+    let z2 = z_rot_w / (1. + p.params.q);
     // Primary position
-    let x1 = - x2 * p.q;
-    let y1 = - y2 * p.q;
-    let z1 = - z2 * p.q;
+    let x1 = - x2 * p.params.q;
+    let y1 = - y2 * p.params.q;
+    let z1 = - z2 * p.params.q;
 
     (Vec3::new(x1, y1, z1) , Vec3::new(x2, y2, z2))
 }
@@ -482,24 +536,20 @@ impl Dust {
     /// Compute gravitational acceleration. 
     fn acceleration(&self, r: Vec3, state: &State) -> Vec3 {
         match self.physics.central_object {
-            CentralObject::Single { mass } => {
+            CentralObject::Single { params } => {
                 let eps = self.physics.softening;
                 let r2 = r.dot(r) + eps * eps;
-                let acc = -mass / (r2.sqrt() * r2);
+                let acc = -params.mass / (r2.sqrt() * r2);
                 acc * r
             }
-            CentralObject::Binary { mass, q, a, e, i } => {
+            CentralObject::Binary { params } => {
                 let p = AnomalyParams{ 
-                    mass: mass, 
-                    q: q, 
-                    a: a, 
-                    e: e, 
-                    i: i,
+                    params: params,
                     mean_anom: 0.0, 
                 };
                 let eps = self.physics.softening;
-                let m1 = mass / (1. + p.q);
-                let m2 = p.q * m1;
+                let m1 = params.mass / (1. + p.params.q);
+                let m2 = p.params.q * m1;
                 let time_since_periapse = state.time;
                 let (r1, r2) = orbital_state(p, time_since_periapse);
                 let r1_sep = r - r1;
@@ -560,52 +610,54 @@ impl Solver for Dust {
         let vshift: Vec3;
         let mshift: f64;
         match self.physics.central_object {
-            CentralObject::Binary { mass, q, a, e, i } => {
-                let p = AnomalyParams { mass: mass, q: q, a: a, e: e, mean_anom: 0.0, i: i };
+            CentralObject::Binary { params } => {
+                let p = AnomalyParams { params: params, mean_anom: 0.0 };
                 let (r1, r2) = orbital_state(p, self.physics.tstart);
                 let r12 = r2 - r1;
                 let theta1 = atan2(r1.y, r1.x);
                 let theta2 = atan2(r2.y, r2.x);
                 match self.initial.disk_center {
                     DiskCenter::Primary => {
-                        mshift = mass / (1. + q);
-                        let v1 = (mshift * mshift * q * q / mass / r12.mag()).sqrt();
+                        mshift = params.mass / (1. + params.q);
+                        let v1 = (mshift * mshift * params.q * params.q / params.mass / r12.mag()).sqrt();
                         rshift = r1;
                         vshift = Vec3::new(- v1 * theta1.sin(), v1 * theta1.cos(),0.);
                     }
                     DiskCenter::Secondary => {
-                        mshift = mass * q / (1. + q);
-                        let v2 = (mshift * mshift / q / q / mass / r12.mag()).sqrt();
+                        mshift = params.mass * params.q / (1. + params.q);
+                        let v2 = (mshift * mshift / params.q / params.q / params.mass / r12.mag()).sqrt();
                         rshift = r2;
                         vshift = Vec3::new(- v2 * theta2.sin(), v2 * theta2.cos(), 0.)
                     }
                     DiskCenter::Arbitrary { x, y , z} => {
                         rshift = Vec3{ x:x , y:y, z:z };
                         vshift = Vec3::default();
-                        mshift = mass;
+                        mshift = params.mass;
                     }
                 }
                 mass_positions.push(r1); mass_positions.push(r2);
                 mass_velocities.push(Vec3::default()); mass_velocities.push(Vec3::default());
             }
-            CentralObject::Single { mass } => {
+            CentralObject::Single { params } => {
                 mass_positions.push(Vec3::default());
                 mass_velocities.push(Vec3::default());
                 rshift = Vec3::default();
                 vshift = Vec3::default();
-                mshift = mass;
+                mshift = params.mass;
             }
             CentralObject::Triple { params } => {
                 let m1 = params.mass / (1. + params.q1) / (1. + params.q2);
                 let m2 = m1 * params.q1;
 
+                // Start binary at periapsis and tertiary object at apoapsis
                 let r1 = params.a1 * (1. - params.e1.mag()) * params.q1 / (1. + params.q1) * Vec3::xhat();
                 let r2 = -1. * r1 / params.q1;
-                let r3 = params.a2 * (1. - params.e2.mag()) / (1. + params.q2) * Vec3::xhat();
+                let r3 = params.a2 * (1. + params.e2.mag()) / (1. + params.q2) * Vec3::xhat();
 
-                let v1 = (m2 * m2 / params.mass / (r2 - r1).mag()).sqrt() * Vec3::yhat();
-                let v2 = - (m1 * m1 / params.mass / (r2 - r1).mag()).sqrt() * Vec3::yhat();
-                let v3 = ((m1 + m2) * (m1 + m2) / params.mass / r3.mag()).sqrt() * Vec3::yhat();
+                let v1 = ( m2 * m2 / params.mass * (2. / (r2 - r1).mag() - 1. / params.a1) ).sqrt() * Vec3::yhat();
+                let v2 = - ( m1 * m1 / params.mass * (2. / (r2 - r1).mag() - 1. / params.a1) ).sqrt() * Vec3::yhat();
+                let v3 = ( (m1 + m2) * (m1 + m2) / params.mass * (2. / r3.mag() - 1./ params.a2) ).sqrt() * Vec3::yhat();
+
                 mass_positions.push(r1); mass_positions.push(r2); mass_positions.push(r3);
                 mass_velocities.push(v1); mass_velocities.push(v2); mass_velocities.push(v3);
                 rshift = Vec3::default();
@@ -699,16 +751,12 @@ impl Solver for Dust {
 
         // Update massive body positions
         match self.physics.central_object {
-            CentralObject::Single { mass: _ } => {
+            CentralObject::Single { params: _ } => {
                 state.mass_positions[0] = Vec3::default();
             }
-            CentralObject::Binary { mass, q, a, e, i } => {
+            CentralObject::Binary { params } => {
                 let p = AnomalyParams{ 
-                    mass: mass, 
-                    q: q, 
-                    a: a, 
-                    e: e, 
-                    i: i,
+                    params: params,
                     mean_anom: 0.0, 
                 };
                 let time_since_periapse = state.time;
@@ -839,10 +887,10 @@ impl DustApp {
             if let (Some(mx), Some(my)) = (mass_x, mass_y) {
                 for i in 0..mx.len() {
                     let color = match i {
-                        0 => rgb_tuple(255, 220, 120),
-                        1 => rgb_tuple(255, 150, 120),
-                        2 => rgb_tuple(120, 200, 255),
-                        _ => rgb_tuple(200, 200, 200),
+                        0 => rgb_tuple(255, 220, 120), // gpui::rgb(255, 220, 120)
+                        1 => rgb_tuple(255, 150, 120), // gpui::rgb(255, 150, 120)
+                        2 => rgb_tuple(120, 200, 255), // gpui::rgb(120, 200, 255)
+                        _ => rgb_tuple(200, 200, 200), // gpui::rgb(200, 200, 200)
                     };
                     let marker_size = match i {
                         0 => 6.0, 
@@ -854,7 +902,10 @@ impl DustApp {
                         0 => String::from("primary"),
                         1 => String::from("secondary"),
                         2 => String::from("tertiary"),
-                        _ => format!("body {i}"),
+                        _ => {
+                            let body = i + 1;
+                            format!("body {body}")
+                        },
                     };
 
                     star_series.push(
@@ -953,13 +1004,9 @@ impl DustApp {
             // Full config JSON — update the form unless it was the source
             DriverEvent::Config(value) => {
                 if let Ok(config) = serde_json::from_value::<SimulationConfig<Dust>>(value.clone()) {
-                    if let CentralObject::Binary { mass, q, a, e , i} = config.physics.central_object {
+                    if let CentralObject::Binary { params } = config.physics.central_object {
                         self.binary_params = Some(AnomalyParams {
-                            mass,
-                            q,
-                            a,
-                            e,
-                            i, 
+                            params: params,
                             mean_anom: 0.0,
                         });
                     } else {
